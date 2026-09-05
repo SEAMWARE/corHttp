@@ -1,7 +1,13 @@
-# corHttp
+# corHttp — an HTTP/1.1 Server, and Nothing Else
 
-An HTTP/1.1 server. It accepts connections, parses requests, and writes
-responses — and does nothing else.
+It accepts connections, parses requests, and writes responses — and does nothing
+else. It is the HTTP server under the coraine NGSI-LD context broker when that
+is built with `COR_HTTP_SERVER=builtin`, and it exists to remove the last
+third-party runtime dependency from that build.
+
+- **Version:** 0.1.0
+- **Language:** C
+- **License:** [Apache License 2.0](LICENSE) — Copyright 2026 Seamware
 
 It does not route, and it does not parse JSON. A request arrives at **one
 callback** with its method, path, query, headers and body, and the caller
@@ -107,6 +113,17 @@ Not one expected byte changed, and that is the bar: the caller of this library
 percent-decodes the path and the query itself — including `+`-means-space, which
 RFC 3986 does not ask for and every HTTP client library produces anyway — so
 what reaches the layer above is what reached it before.
+
+## Dependencies
+
+One sibling k-lib repo, and libc. No libmicrohttpd, no OpenSSL, no JSON library.
+
+- [`kalloc`](https://gitlab.com/kzangeli/kalloc) — arena allocator (`KAlloc`),
+  used for the per-request pool on each connection
+
+The layout is the build contract, as everywhere in this stack: repos are
+siblings, sources compile with `-I..` and consumers link
+`../corHttp/libcorHttp.a` straight out of the checkout.
 
 ## Licence
 

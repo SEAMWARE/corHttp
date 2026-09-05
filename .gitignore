@@ -1,8 +1,11 @@
 obj/
+bin/
 *.o
 *.d
 *.a
 *.so
+*.so.*
 *.gcno
 *.gcda
+*~
 corHttpTest
