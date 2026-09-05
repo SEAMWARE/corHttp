@@ -1,0 +1,8 @@
+obj/
+*.o
+*.d
+*.a
+*.so
+*.gcno
+*.gcda
+corHttpTest
