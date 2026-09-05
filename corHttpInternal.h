@@ -54,6 +54,9 @@ extern CorHttpStatus  corHttpParse(CorHttpConn* connP);
 // corHttpResponseRender - build the wire bytes into connP->writeBuf
 extern CorHttpStatus  corHttpResponseRender(CorHttpConn* connP);
 
+// corHttpContinueSend  - the interim "100 Continue", ahead of the real response
+extern CorHttpStatus  corHttpContinueSend(CorHttpConn* connP);
+
 extern uint64_t       corHttpNowMs(void);
 
 #endif  // CORHTTP_CORHTTPINTERNAL_H_

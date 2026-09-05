@@ -168,6 +168,8 @@ void corHttpConnReset(CorHttpConn* connP)
   connP->headersTruncated   = false;
   connP->uriParamsTruncated = false;
   connP->contentLength      = -1;
+  connP->expectContinue     = false;
+  connP->continueSent       = false;
 
   connP->statusCode         = 0;
   connP->respHeaders        = 0;

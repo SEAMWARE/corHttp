@@ -148,6 +148,8 @@ typedef struct CorHttpConn
   KAlloc               alloc;
   char                 allocBuf[8 * 1024];
 
+  bool                 expectContinue;           // client sent Expect: 100-continue and is waiting
+  bool                 continueSent;             // ... and we have already answered it
   bool                 keepAlive;
   int                  requests;                 // served on this connection
   uint64_t             lastActivity;             // CLOCK_MONOTONIC ms, for the idle sweep

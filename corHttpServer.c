@@ -353,7 +353,20 @@ static void requestReady(CorHttpServer* serverP, CorHttpConn* connP)
   CorHttpStatus s = corHttpParse(connP);
 
   if (s == CorHttpAgain)
+  {
+    //
+    // Once per request, not once per read: a client that asked for it is told
+    // to go ahead, and telling it twice would put a second interim response on
+    // the wire for a body already on its way.
+    //
+    if ((connP->expectContinue == true) && (connP->continueSent == false))
+    {
+      connP->continueSent = true;
+      corHttpContinueSend(connP);
+    }
+
     return;                                      // wait for the rest of it
+  }
 
   if (s == CorHttpTooLarge)
   {

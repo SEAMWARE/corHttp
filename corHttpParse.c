@@ -360,6 +360,57 @@ static int contentLengthPeek(char* buf, char* headerEnd)
 
 // -----------------------------------------------------------------------------
 //
+// expectContinuePeek - did the client ask to be told to go ahead?
+//
+// Read-only, like contentLengthPeek and for the same reason: it runs while the
+// request is still incomplete, and writing into the buffer before it is whole
+// is what the note at the top of this file is about.
+//
+static bool expectContinuePeek(char* buf, char* headerEnd)
+{
+  static const char  name[]  = "expect";
+  const int          nameLen = sizeof(name) - 1;
+  char*              p       = buf;
+
+  while ((p < headerEnd) && (*p != '\n'))       // past the request line
+    p++;
+
+  while (p < headerEnd)
+  {
+    p++;
+
+    if ((headerEnd - p) < nameLen + 1)
+      break;
+
+    if (strncasecmp(p, name, nameLen) == 0)
+    {
+      char* v = p + nameLen;
+
+      while ((v < headerEnd) && ((*v == ' ') || (*v == '\t')))
+        v++;
+
+      if ((v < headerEnd) && (*v == ':'))
+      {
+        v++;
+        while ((v < headerEnd) && ((*v == ' ') || (*v == '\t')))
+          v++;
+
+        if (((headerEnd - v) >= 12) && (strncasecmp(v, "100-continue", 12) == 0))
+          return true;
+      }
+    }
+
+    while ((p < headerEnd) && (*p != '\n'))
+      p++;
+  }
+
+  return false;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // corHttpParse -
 //
 CorHttpStatus corHttpParse(CorHttpConn* connP)
@@ -383,7 +434,19 @@ CorHttpStatus corHttpParse(CorHttpConn* connP)
   int declaredLength = contentLengthPeek(buf, headerEnd);
 
   if ((declaredLength > 0) && ((int) (end - headerEnd) < declaredLength))
+  {
+    //
+    // The headers are all here and the body is not - which is exactly the
+    // moment a client that sent `Expect: 100-continue` is waiting for an
+    // answer before it sends one. Say so on the way out; the loop does the
+    // writing. Forgetting this does not fail, it STALLS: curl waits a second
+    // and sends the body anyway, so the symptom is a suite that passes slowly.
+    //
+    if (expectContinuePeek(buf, headerEnd) == true)
+      connP->expectContinue = true;
+
     return CorHttpAgain;
+  }
 
   //
   // Step two, destructive, and reached exactly once per request.
