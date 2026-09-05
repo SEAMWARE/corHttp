@@ -146,10 +146,35 @@ static int epollSet(CorHttpServer* serverP, CorHttpConn* connP, uint32_t events,
 
 // -----------------------------------------------------------------------------
 //
+// requestDone - tell the caller its request is over
+//
+// Guarded on userData rather than on a flag of its own: userData is the ONLY
+// thing the caller has hung on the connection, so "there is something to free"
+// and "userData is set" are the same question. The callback clears it, which is
+// also what makes this idempotent - a response that completes and a connection
+// that is then closed both come through here, and the second finds nothing.
+//
+static void requestDone(CorHttpServer* serverP, CorHttpConn* connP)
+{
+  if ((serverP->doneCb != NULL) && (connP->userData != NULL))
+    serverP->doneCb(connP);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // connClose -
 //
 static void connClose(CorHttpServer* serverP, CorHttpConn* connP)
 {
+  //
+  // Before the connection goes back to the pool, not after: the callback may
+  // still want to read the request it was given, and every slice of it points
+  // into a read buffer this connection is about to hand to the next client.
+  //
+  requestDone(serverP, connP);
+
   if (connP->fd != -1)
     epoll_ctl(serverP->epollFd, EPOLL_CTL_DEL, connP->fd, NULL);
 
@@ -310,6 +335,8 @@ static void responseSend(CorHttpServer* serverP, CorHttpConn* connP)
   connP->requests++;
   connP->lastActivity = corHttpNowMs();
 
+  requestDone(serverP, connP);
+
   if ((connP->keepAlive == false) || (serverP->keepAliveTimeout == 0))
   {
     connClose(serverP, connP);
@@ -410,8 +437,20 @@ static void requestReady(CorHttpServer* serverP, CorHttpConn* connP)
 // business: no epoll interest, no timeout sweep, no reuse - until
 // corHttpResume() puts it back.
 //
+// "No epoll interest" is a DELETE and not merely a state change. Left armed,
+// the fd still reports EPOLLHUP the moment the client hangs up - and this loop
+// would then close a connection a worker thread is still holding, returning it
+// to the pool to be handed to the next client while the worker writes its
+// answer into it. A client that gives up on a slow request is not a rare
+// event; it is what a timeout looks like.
+//
 void corHttpSuspend(CorHttpConn* connP)
 {
+  CorHttpServer* serverP = connP->serverP;
+
+  if ((serverP != NULL) && (connP->fd != -1))
+    epoll_ctl(serverP->epollFd, EPOLL_CTL_DEL, connP->fd, NULL);
+
   connP->state = COR_HTTP_CONN_IDLE;
 }
 
@@ -464,6 +503,15 @@ static void resumeDrain(CorHttpServer* serverP)
 
     connP->next  = NULL;
     connP->state = COR_HTTP_CONN_WRITING;
+
+    //
+    // ADD and not MOD: corHttpSuspend removed this fd from the event set, so
+    // there is no interest to modify. responseSend may need EPOLLOUT if the
+    // answer does not fit the socket buffer, and that MOD needs a registration
+    // to modify.
+    //
+    epollSet(serverP, connP, EPOLLIN, EPOLL_CTL_ADD);
+
     responseSend(serverP, connP);
 
     connP = nextP;
@@ -499,6 +547,8 @@ static void connEvent(CorHttpServer* serverP, CorHttpConn* connP, uint32_t event
 
     connP->requests++;
     connP->lastActivity = corHttpNowMs();
+
+    requestDone(serverP, connP);
 
     if (connP->keepAlive == false)
     {

@@ -132,6 +132,7 @@ typedef struct CorHttpConn
   bool                 uriParamsTruncated;
 
   int                  contentLength;            // -1 when the header was absent
+  bool                 bodyRefused;              // Content-Length over the cap: headers delivered, body never read
 
   // The response the callback fills in, via corHttpResponse*().
   int                  statusCode;
@@ -156,6 +157,7 @@ typedef struct CorHttpConn
 
   void*                userData;                 // the caller's, untouched here
 
+  struct CorHttpServer* serverP;                 // the loop this connection belongs to
   struct CorHttpConn*  next;                     // free-list linkage
 } CorHttpConn;
 
@@ -176,6 +178,25 @@ typedef void (*CorHttpRequestCb)(CorHttpConn* connP);
 
 // -----------------------------------------------------------------------------
 //
+// CorHttpDoneCb - the request is over and its bytes are on the wire
+//
+// Optional, and it exists for the one thing the request callback cannot do: a
+// caller that hung per-request state on connP->userData has to free it, and the
+// only safe moment is after the response has been WRITTEN - the response
+// headers and body are borrowed from that state, not copied.
+//
+// Called exactly once per request that reached the request callback, on the
+// loop thread: after the last byte goes out, or when the connection dies with a
+// request still on it. Never for a request the engine answered by itself (a
+// parse error, a 413), because those never reached the caller and there is
+// nothing of the caller's to free.
+//
+typedef void (*CorHttpDoneCb)(CorHttpConn* connP);
+
+
+
+// -----------------------------------------------------------------------------
+//
 // CorHttpServer
 //
 typedef struct CorHttpServer
@@ -190,8 +211,18 @@ typedef struct CorHttpServer
   int                  activeConns;
 
   CorHttpRequestCb     requestCb;
+  CorHttpDoneCb        doneCb;                   // optional; see CorHttpDoneCb
 
   int                  keepAliveTimeout;         // seconds; 0 disables keep-alive
+  //
+  // maxRequestSize - the largest request this server will hold, in bytes
+  //
+  // Enforced at the ANNOUNCEMENT where it can be: a Content-Length over this is
+  // refused before a byte of the body is read, and the request reaches the
+  // callback with bodyRefused set and no body, so the caller answers it in its
+  // own words rather than being handed a bare status by the engine. Only a
+  // client that lies about its length gets as far as the buffer limit.
+  //
   int                  maxRequestSize;           // bytes; 0 = no cap
 
   bool                 running;

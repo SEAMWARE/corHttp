@@ -168,6 +168,7 @@ void corHttpConnReset(CorHttpConn* connP)
   connP->headersTruncated   = false;
   connP->uriParamsTruncated = false;
   connP->contentLength      = -1;
+  connP->bodyRefused        = false;
   connP->expectContinue     = false;
   connP->continueSent       = false;
 
@@ -199,6 +200,7 @@ CorHttpConn* corHttpConnGet(CorHttpServer* serverP, int fd)
   connP->next        = NULL;
 
   connP->fd           = fd;
+  connP->serverP      = serverP;
   connP->state        = COR_HTTP_CONN_READING;
   connP->keepAlive    = true;
   connP->requests     = 0;

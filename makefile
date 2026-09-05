@@ -7,15 +7,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 #
-# The k-libs are collected into the corLibs umbrella, NEXT TO this repo - the
-# same layout every other lib in the stack builds against.
+# Every library in this stack is a SIBLING repo - `-I..` and `../<name>/lib<name>.a`
+# is the layout, and it is part of the build contract rather than a convenience.
 #
-# := and not ?=/= : MAKEFILE_LIST grows as make reads more files, so evaluating
-# it lazily inside a rule resolves it against whatever was included last.
-#
-THIS_DIR     := $(dir $(lastword $(MAKEFILE_LIST)))
-KLIB_DIR     ?= $(abspath $(THIS_DIR)../corLibs/lib)
-
 LIB_SO        = libcorHttp.so
 LIB           = libcorHttp.a
 CC            = gcc
@@ -38,17 +32,22 @@ OBJDIR        = obj/$(BUILD)
 OBJECTS       = $(LIB_SOURCES:%.c=$(OBJDIR)/%.o)
 DEPS          = $(OBJECTS:.o=.d)
 
-PREFIX       ?= /usr/local
-INC_DIR       = $(PREFIX)/include/corHttp
-LIB_DIR       = $(PREFIX)/lib
+#
+# The k-libs this library links against, by path rather than by -L/-l: the
+# sibling checkout is the source of truth, and a -l would happily find an older
+# copy installed somewhere on the system.
+#
+LIBS          = ../kalloc/libkalloc.a ../kbase/libkbase.a -lpthread
 
-all: $(LIB) $(LIB_SO)
+TEST          = corHttpTest
+
+all: $(LIB) $(LIB_SO) $(TEST)
 
 #
 # corHttpTest - a server that answers, for exercising the library alone
 #
-corHttpTest: corHttpTest.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ corHttpTest.c $(LIB) -L$(KLIB_DIR) -lkalloc -lkbase -lpthread
+$(TEST): corHttpTest.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ corHttpTest.c $(LIB) $(LIBS)
 
 #
 # $(OBJDIR)/.flags - rebuild when the COMPILE LINE changes
@@ -66,28 +65,41 @@ $(OBJDIR)/%.o: %.c $(OBJDIR)/.flags
 	@mkdir -p $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+#
+# Removed first: `ar r` replaces and adds but never removes, so an object that
+# is no longer built stays in the archive forever, and the next link quietly
+# uses code that is not in the tree any more.
+#
 $(LIB): $(OBJECTS)
+	@rm -f $@
 	ar rcs $@ $(OBJECTS)
 
 $(LIB_SO): $(OBJECTS)
 	$(CC) -shared -o $@ $(OBJECTS)
 
+#
+# install - NOT a copy into /usr/local, and deliberately so.
+#
+# Nothing in this stack installs headers or libraries system-wide: consumers
+# compile with `-I..` and link `../corHttp/libcorHttp.a` straight out of the
+# checkout, so `all` has already put the artefacts where every consumer looks
+# for them. What is left is the sibling convention - the test binary goes into
+# bin/, the same as every other lib here - and `make install` needing sudo to
+# succeed would be a bug, not a policy.
+#
 install: all
-	mkdir -p $(INC_DIR) $(LIB_DIR)
-	# Replace the header set rather than adding to it: `cp *.h` never removes a
-	# header that was deleted here, and one has survived its own deletion before.
-	rm -rf $(INC_DIR)
-	mkdir -p $(INC_DIR)
-	cp *.h $(INC_DIR)/
-	cp $(LIB) $(LIB_SO) $(LIB_DIR)/
+	@if [ ! -d bin ]; then mkdir bin; fi
+	cp $(TEST) bin/
 
 di: all install
 
+ci: clean install
+
 clean:
-	rm -rf obj $(LIB) $(LIB_SO) corHttpTest *.o *.d *.gcno *.gcda
+	rm -rf obj $(LIB) $(LIB_SO) $(TEST) *.o *.d *.gcno *.gcda
 
 FORCE:
 
-.PHONY: all install di clean FORCE
+.PHONY: all install di ci clean FORCE
 
 -include $(DEPS)

@@ -50,6 +50,32 @@ function here that may be called from another thread, and it queues the
 connection and pokes an eventfd rather than writing the socket, because two
 threads writing one response is how two answers end up interleaved.
 
+**The request is over when its bytes are out, not when the callback returns.**
+A caller that hangs per-request state on `connP->userData` gets it back through
+`server.doneCb` after the last byte of the response has been written — because
+the response headers and body are *borrowed* from that state, not copied. It
+fires once per request that reached the callback, including one whose connection
+died mid-answer, and never for a request the engine refused by itself.
+
+**An oversized body is refused at the announcement.** A `Content-Length` over
+`server.maxRequestSize` means the body is never read: the request reaches the
+callback with `bodyRefused` set and no body, so the answer is the caller's own —
+with whatever error document it wants to send — rather than a bare status from
+here. The connection is not reusable afterwards (the rest of the body is still
+arriving) and is closed, which is what the `Connection: close` on that answer
+says. Only a client that *lies* about its length reaches the buffer limit.
+
+## Not implemented
+
+**HTTP pipelining.** A second request arriving in the same packet as the first
+is dropped rather than answered. No client this serves pipelines — curl does
+not, browsers disabled it — and doing it properly means driving the read loop
+from the response side.
+
+**TLS.** There is no HTTPS listener. The intended deployment puts a proxy in
+front, and a server that quietly served an unencrypted port when asked for TLS
+would be worse than one that has none.
+
 ## Build
 
 ```console
@@ -71,8 +97,16 @@ $ curl "localhost:1041/ngsi-ld/v1/entities?type=T&limit=5&local"
 
 ## Status
 
-Early. The server works — keep-alive, bodies of any size the cap allows,
-suspend/resume, the idle sweep — and is not yet wired into anything.
+In use. `corRest` selects it with `COR_HTTP_SERVER=builtin`, and the coraine
+NGSI-LD broker then runs with no HTTP dependency beyond libc. Coraine's
+functional suite compares captured HTTP responses line by line and goes green on
+both servers — 641 tests on libmicrohttpd, 640 on this one, the difference being
+the single test whose notification receiver has to serve HTTPS.
+
+Not one expected byte changed, and that is the bar: the caller of this library
+percent-decodes the path and the query itself — including `+`-means-space, which
+RFC 3986 does not ask for and every HTTP client library produces anyway — so
+what reaches the layer above is what reached it before.
 
 ## Licence
 

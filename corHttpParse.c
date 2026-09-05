@@ -120,6 +120,16 @@ static CorHttpStatus requestLine(CorHttpConn* connP, char* line, int lineLen)
   connP->version.len = (int) (end - p);
 
   //
+  // Terminate the last field on the line, whichever it turned out to be. The
+  // loops above only write a NUL where they found a SPACE, so a truncated
+  // request line - "GET /x", no version - would leave the path running into
+  // the CRLF and the headers after it. The byte written over is the line
+  // terminator, and lineEnd() has already handed the caller the start of the
+  // next line, so there is nothing left that needs it.
+  //
+  *end = 0;
+
+  //
   // HTTP/1.1 is keep-alive unless it says otherwise; 1.0 is the reverse. The
   // Connection header, parsed below, overrides either way.
   //
@@ -433,7 +443,23 @@ CorHttpStatus corHttpParse(CorHttpConn* connP)
 
   int declaredLength = contentLengthPeek(buf, headerEnd);
 
-  if ((declaredLength > 0) && ((int) (end - headerEnd) < declaredLength))
+  //
+  // A body the server has already decided it will not accept is not read at
+  // all. The request goes up WITHOUT it, and the caller - which knows what a
+  // refusal should look like, and this library does not - answers from the
+  // Content-Length header, which is still there.
+  //
+  // The connection cannot survive it: the rest of the body is on its way and
+  // would be read as the start of the next request. So it is answered and
+  // closed, which is what `Connection: close` on that answer says.
+  //
+  if ((connP->serverP != NULL) && (connP->serverP->maxRequestSize > 0) &&
+      (declaredLength > connP->serverP->maxRequestSize))
+  {
+    connP->bodyRefused = true;
+    connP->keepAlive   = false;
+  }
+  else if ((declaredLength > 0) && ((int) (end - headerEnd) < declaredLength))
   {
     //
     // The headers are all here and the body is not - which is exactly the
@@ -490,7 +516,7 @@ CorHttpStatus corHttpParse(CorHttpConn* connP)
 
   uriParams(connP);
 
-  if (connP->contentLength > 0)
+  if ((connP->contentLength > 0) && (connP->bodyRefused == false))
   {
     if ((int) (end - p) < connP->contentLength)
       return CorHttpAgain;
