@@ -90,6 +90,24 @@ static int listener(unsigned short port)
   int one = 1;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
+  //
+  // SO_REUSEPORT so that MORE THAN ONE server can hold this port, each with its
+  // own listen socket, its own epoll and its own thread. The kernel then hashes
+  // each incoming connection to one of them, and a connection belongs to one
+  // loop for its whole life - which keeps the invariant that makes the writes
+  // safe (one connection, one writer, one answer at a time) rather than
+  // weakening it.
+  //
+  // Harmless with a single server, which is why it is unconditional: one holder
+  // of a port behaves exactly as before.
+  //
+  // Not fatal if it fails. An older kernel without SO_REUSEPORT still runs one
+  // loop perfectly well, and that is better than refusing to start.
+  //
+#ifdef SO_REUSEPORT
+  setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+#endif
+
   struct sockaddr_in addr;
 
   memset(&addr, 0, sizeof(addr));
