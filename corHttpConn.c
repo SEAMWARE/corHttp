@@ -83,6 +83,7 @@ CorHttpStatus corHttpConnPoolInit(CorHttpServer* serverP, int size)
 
     connP->bufSize = COR_HTTP_INITIAL_BUF_SIZE;
     connP->fd      = -1;
+    connP->serverP = serverP;                    // the pool belongs to one loop for its whole life
     connP->state   = COR_HTTP_CONN_FREE;
 
     connP->next        = serverP->freeConns;

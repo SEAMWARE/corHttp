@@ -24,6 +24,7 @@
 // Nothing is duplicated, and nothing survives the callback returning - a caller
 // that needs a value afterwards has to copy it.
 //
+#include <pthread.h>                             // pthread_mutex_t
 #include <stdbool.h>                             // bool
 #include <stdint.h>                              // uint64_t
 
@@ -157,7 +158,13 @@ typedef struct CorHttpConn
 
   void*                userData;                 // the caller's, untouched here
 
-  struct CorHttpServer* serverP;                 // the loop this connection belongs to
+  //
+  // The loop this connection belongs to. corHttpResume runs on a WORKER thread
+  // and has to reach the right loop's resume queue and eventfd; the connection
+  // is the only thing that worker holds, so this is the path to it. With one
+  // loop a file-static would have done - which is what it used to be.
+  //
+  struct CorHttpServer* serverP;
   struct CorHttpConn*  next;                     // free-list linkage
 } CorHttpConn;
 
@@ -224,6 +231,19 @@ typedef struct CorHttpServer
   // client that lies about its length gets as far as the buffer limit.
   //
   int                  maxRequestSize;           // bytes; 0 = no cap
+
+  //
+  // The resume queue: responses a worker has finished, waiting for THIS loop to
+  // write them out. Per server rather than per file, because the socket writes
+  // are the loop's alone (see corHttpResume) and a second loop must not be
+  // handed the first one's connections.
+  //
+  // resumeFd is an eventfd registered in this server's epoll with data.ptr set
+  // to the server itself, which is how the loop tells it apart from a socket.
+  //
+  pthread_mutex_t      resumeMutex;
+  CorHttpConn*         resumeHead;
+  int                  resumeFd;
 
   bool                 running;
 } CorHttpServer;

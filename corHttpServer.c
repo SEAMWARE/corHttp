@@ -52,9 +52,6 @@
 // the length of a pointer assignment, and is the single piece of cross-thread
 // state in the library.
 //
-static pthread_mutex_t  resumeMutex = PTHREAD_MUTEX_INITIALIZER;
-static CorHttpConn*     resumeHead  = NULL;
-static int              resumeFd    = -1;
 
 
 
@@ -467,15 +464,17 @@ void corHttpSuspend(CorHttpConn* connP)
 //
 void corHttpResume(CorHttpConn* connP)
 {
-  pthread_mutex_lock(&resumeMutex);
-  connP->next = resumeHead;
-  resumeHead  = connP;
-  pthread_mutex_unlock(&resumeMutex);
+  CorHttpServer* serverP = connP->serverP;       // the loop that owns this connection
 
-  if (resumeFd != -1)
+  pthread_mutex_lock(&serverP->resumeMutex);
+  connP->next        = serverP->resumeHead;
+  serverP->resumeHead = connP;
+  pthread_mutex_unlock(&serverP->resumeMutex);
+
+  if (serverP->resumeFd != -1)
   {
     uint64_t one = 1;
-    ssize_t  ignored = write(resumeFd, &one, sizeof(one));
+    ssize_t  ignored = write(serverP->resumeFd, &one, sizeof(one));
     (void) ignored;                              // a full counter means the loop is already awake
   }
 }
@@ -489,13 +488,13 @@ void corHttpResume(CorHttpConn* connP)
 static void resumeDrain(CorHttpServer* serverP)
 {
   uint64_t counter;
-  ssize_t  ignored = read(resumeFd, &counter, sizeof(counter));
+  ssize_t  ignored = read(serverP->resumeFd, &counter, sizeof(counter));
   (void) ignored;
 
-  pthread_mutex_lock(&resumeMutex);
-  CorHttpConn* connP = resumeHead;
-  resumeHead = NULL;
-  pthread_mutex_unlock(&resumeMutex);
+  pthread_mutex_lock(&serverP->resumeMutex);
+  CorHttpConn* connP = serverP->resumeHead;
+  serverP->resumeHead = NULL;
+  pthread_mutex_unlock(&serverP->resumeMutex);
 
   while (connP != NULL)
   {
@@ -647,6 +646,9 @@ CorHttpStatus corHttpInit(CorHttpServer* serverP, unsigned short port, int connP
   serverP->maxRequestSize   = 0;
   serverP->listenFd         = -1;
   serverP->epollFd          = -1;
+  serverP->resumeFd         = -1;
+  serverP->resumeHead       = NULL;
+  pthread_mutex_init(&serverP->resumeMutex, NULL);   // after the memset, not a static initialiser
 
   if (cb == NULL)
     return CorHttpError;
@@ -688,9 +690,9 @@ CorHttpStatus corHttpInit(CorHttpServer* serverP, unsigned short port, int connP
     return CorHttpError;
   }
 
-  resumeFd = eventfd(0, EFD_NONBLOCK);
+  serverP->resumeFd = eventfd(0, EFD_NONBLOCK);
 
-  if (resumeFd < 0)
+  if (serverP->resumeFd < 0)
   {
     corHttpRelease(serverP);
     return CorHttpError;
@@ -700,7 +702,7 @@ CorHttpStatus corHttpInit(CorHttpServer* serverP, unsigned short port, int connP
   ev.events   = EPOLLIN;
   ev.data.ptr = serverP;                         // the server itself = the resume eventfd
 
-  if (epoll_ctl(serverP->epollFd, EPOLL_CTL_ADD, resumeFd, &ev) < 0)
+  if (epoll_ctl(serverP->epollFd, EPOLL_CTL_ADD, serverP->resumeFd, &ev) < 0)
   {
     corHttpRelease(serverP);
     return CorHttpError;
@@ -786,11 +788,13 @@ void corHttpStop(CorHttpServer* serverP)
 //
 void corHttpRelease(CorHttpServer* serverP)
 {
-  if (resumeFd != -1)
+  if (serverP->resumeFd != -1)
   {
-    close(resumeFd);
-    resumeFd = -1;
+    close(serverP->resumeFd);
+    serverP->resumeFd = -1;
   }
+
+  pthread_mutex_destroy(&serverP->resumeMutex);
 
   if (serverP->epollFd != -1)
   {
