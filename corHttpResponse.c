@@ -65,6 +65,7 @@ static const char* reasonPhrase(int code)
   case 100: return "Continue";
   case 200: return "OK";
   case 201: return "Created";
+  case 202: return "Accepted";
   case 204: return "No Content";
   case 207: return "Multi-Status";
   case 400: return "Bad Request";
