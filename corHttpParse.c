@@ -27,7 +27,7 @@
 #include <stdlib.h>                              // atoi
 #include <string.h>                              // memchr, memcmp, memcpy, strlen, strncasecmp
 
-#include "kalloc/kaAlloc.h"                      // kaAlloc
+#include "corAlloc/corAlloc.h"                   // corAlloc
 
 #include "corHttp/CorHttp.h"                     // CorHttpConn, CorHttpStatus
 #include "corHttp/corHttpInternal.h"             // Own interface
@@ -219,7 +219,7 @@ static void uriParams(CorHttpConn* connP)
   if ((connP->query.s == NULL) || (connP->query.len == 0))
     return;
 
-  char* copy = kaAlloc(&connP->alloc, connP->query.len + 1);
+  char* copy = corAlloc(&connP->alloc, connP->query.len + 1);
 
   if (copy == NULL)
   {

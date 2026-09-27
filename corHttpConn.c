@@ -24,8 +24,8 @@
 #include <time.h>                                // clock_gettime
 #include <unistd.h>                              // close
 
-#include "kalloc/kaBufferInit.h"                 // kaBufferInit
-#include "kalloc/kaBufferReset.h"                // kaBufferReset
+#include "corAlloc/corAllocBufferInit.h"         // corAllocBufferInit
+#include "corAlloc/corAllocBufferReset.h"        // corAllocBufferReset
 
 #include "corHttp/CorHttp.h"                     // CorHttpConn, CorHttpServer
 #include "corHttp/corHttpInternal.h"             // Own interface
@@ -144,7 +144,7 @@ void corHttpConnPoolRelease(CorHttpServer* serverP)
 // Not the same thing as returning it to the pool: the fd stays open, the read
 // buffer keeps its capacity, and only the request and response state goes.
 //
-// kaBufferReset takes KTRUE here, and the flag is not decoration. With KFALSE
+// corAllocBufferReset takes true here, and the flag is not decoration. With false
 // it frees the blocks and leaves the list pointing at them, which is teardown;
 // calling it that way in a loop double-frees on the second pass. This is a
 // loop, once per request, for the life of the process.
@@ -181,7 +181,7 @@ void corHttpConnReset(CorHttpConn* connP)
   connP->writeLen           = 0;
   connP->writePos           = 0;
 
-  kaBufferReset(&connP->alloc, KTRUE);
+  corAllocBufferReset(&connP->alloc, true);
 }
 
 
@@ -208,7 +208,7 @@ CorHttpConn* corHttpConnGet(CorHttpServer* serverP, int fd)
   connP->userData     = NULL;
   connP->lastActivity = corHttpNowMs();
 
-  kaBufferInit(&connP->alloc, connP->allocBuf, sizeof(connP->allocBuf), 8 * 1024, NULL, "corHttp-conn");
+  corAllocBufferInit(&connP->alloc, connP->allocBuf, sizeof(connP->allocBuf), 8 * 1024, NULL, "corHttp-conn");
 
   corHttpConnReset(connP);
 
@@ -235,11 +235,11 @@ void corHttpConnPut(CorHttpServer* serverP, CorHttpConn* connP)
   }
 
   //
-  // KFALSE here and KTRUE in the reset above, and the asymmetry is the point:
+  // false here and true in the reset above, and the asymmetry is the point:
   // this IS the teardown of that request's allocations, and the connection will
-  // get a fresh kaBufferInit before it is used again.
+  // get a fresh corAllocBufferInit before it is used again.
   //
-  kaBufferReset(&connP->alloc, KFALSE);
+  corAllocBufferReset(&connP->alloc, false);
 
   if (connP->writeBuf != NULL)
   {
