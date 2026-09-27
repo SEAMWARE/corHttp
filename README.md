@@ -15,7 +15,7 @@ decides everything from there. Routing belongs to the layer that owns the
 service table; putting it here would mean two of them. Dropping JSON drops a
 dependency and leaves the engine dealing in bytes.
 
-The only dependencies are **kalloc and libc**.
+The only dependencies are **corAlloc and libc**.
 
 ## Design
 
@@ -118,7 +118,7 @@ what reaches the layer above is what reached it before.
 
 One sibling k-lib repo, and libc. No libmicrohttpd, no OpenSSL, no JSON library.
 
-- [`kalloc`](https://gitlab.com/kzangeli/kalloc) — arena allocator (`KAlloc`),
+- [`corAlloc`](https://github.com/SEAMWARE/corAlloc) — arena allocator (`CorAlloc`),
   used for the per-request pool on each connection
 
 The layout is the build contract, as everywhere in this stack: repos are

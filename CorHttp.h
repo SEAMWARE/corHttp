@@ -28,7 +28,7 @@
 #include <stdbool.h>                             // bool
 #include <stdint.h>                              // uint64_t
 
-#include "kalloc/KAlloc.h"                       // KAlloc
+#include "corAlloc/CorAlloc.h"                   // CorAlloc
 
 
 
@@ -147,7 +147,7 @@ typedef struct CorHttpConn
   int                  writeLen;
   int                  writePos;
 
-  KAlloc               alloc;
+  CorAlloc             alloc;
   char                 allocBuf[8 * 1024];
 
   bool                 expectContinue;           // client sent Expect: 100-continue and is waiting

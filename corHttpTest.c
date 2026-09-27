@@ -20,7 +20,7 @@
 #include <stdio.h>                               // printf, snprintf
 #include <stdlib.h>                              // atoi
 
-#include "kalloc/kaAlloc.h"                      // kaAlloc
+#include "corAlloc/corAlloc.h"                   // corAlloc
 
 #include "corHttp/CorHttp.h"                     // the library
 
@@ -56,7 +56,7 @@ static void request(CorHttpConn* connP)
   // response body must outlive this function (the loop writes it after we
   // return) and must not need freeing (the connection resets in bulk).
   //
-  char* body = kaAlloc(&connP->alloc, 1024);
+  char* body = corAlloc(&connP->alloc, 1024);
 
   int len = snprintf(body, 1024,
                      "{\"method\":\"%s\",\"path\":\"%s\",\"query\":\"%s\","
