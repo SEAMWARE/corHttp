@@ -116,10 +116,11 @@ what reaches the layer above is what reached it before.
 
 ## Dependencies
 
-One sibling k-lib repo, and libc. No libmicrohttpd, no OpenSSL, no JSON library.
+Two sibling repos, and libc. No libmicrohttpd, no OpenSSL, no JSON library.
 
 - [`corAlloc`](https://github.com/SEAMWARE/corAlloc) — arena allocator (`CorAlloc`),
   used for the per-request pool on each connection
+- [`corBase`](https://github.com/SEAMWARE/corBase) — the library log corAlloc logs through
 
 The layout is the build contract, as everywhere in this stack: repos are
 siblings, sources compile with `-I..` and consumers link
