@@ -37,7 +37,7 @@ DEPS          = $(OBJECTS:.o=.d)
 # sibling checkout is the source of truth, and a -l would happily find an older
 # copy installed somewhere on the system.
 #
-LIBS          = ../corAlloc/libcorAlloc.a ../kbase/libkbase.a -lpthread
+LIBS          = ../corAlloc/libcorAlloc.a ../corBase/libcorBase.a -lpthread
 
 TEST          = corHttpTest
 
