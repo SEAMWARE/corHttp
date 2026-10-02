@@ -153,6 +153,7 @@ typedef struct CorHttpConn
   bool                 expectContinue;           // client sent Expect: 100-continue and is waiting
   bool                 continueSent;             // ... and we have already answered it
   bool                 keepAlive;
+  bool                 inCallback;               // internal: inside requestCb - see corHttpResumeHere
   int                  requests;                 // served on this connection
   uint64_t             lastActivity;             // CLOCK_MONOTONIC ms, for the idle sweep
 

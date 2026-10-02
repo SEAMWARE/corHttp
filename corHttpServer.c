@@ -525,7 +525,9 @@ static void requestReady(CorHttpServer* serverP, CorHttpConn* connP)
   }
 
   connP->statusCode = 0;
+  connP->inCallback = true;
   serverP->requestCb(connP);
+  connP->inCallback = false;
 
   //
   // A callback that suspended has taken ownership: a worker thread will answer,
@@ -608,6 +610,15 @@ void corHttpResumeHere(CorHttpConn* connP)
 
   connP->state = COR_HTTP_CONN_WRITING;
   epollSet(serverP, connP, EPOLLIN, EPOLL_CTL_ADD);   // ADD: corHttpSuspend removed it
+
+  //
+  // Still inside the callback - a coroutine that finished without ever waiting: requestReady sends the
+  // response when the callback returns, as for any answer given there. Sent here as well, it went out
+  // twice - the second an empty one, which a keep-alive client took for its next request's answer.
+  //
+  if (connP->inCallback == true)
+    return;
+
   responseSend(serverP, connP);
 }
 
