@@ -291,6 +291,12 @@ extern const char*    corHttpUriParam(CorHttpConn* connP, const char* key);
 extern void           corHttpSuspend(CorHttpConn* connP);
 extern void           corHttpResume(CorHttpConn* connP);
 
+//
+// corHttpResumeHere - corHttpResume for code that runs ON the loop's thread (a coroutine of the loop):
+// the response goes out at once, no queue, no eventfd
+//
+extern void           corHttpResumeHere(CorHttpConn* connP);
+
 
 
 // -----------------------------------------------------------------------------

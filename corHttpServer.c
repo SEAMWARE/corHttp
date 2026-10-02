@@ -38,6 +38,7 @@
 #include <sys/socket.h>                          // socket, bind, listen, accept4, setsockopt
 #include <unistd.h>                              // read, write, close
 
+#include "corBase/corCoLoop.h"                  // corCoLoopEvent, corCoLoopExpire, corCoLoopTimeoutMs
 #include "corHttp/CorHttp.h"                     // CorHttpServer, CorHttpConn
 #include "corHttp/corHttpInternal.h"             // Own interface
 
@@ -501,6 +502,24 @@ void corHttpResume(CorHttpConn* connP)
 
 // -----------------------------------------------------------------------------
 //
+// corHttpResumeHere - the response is ready, and this IS the loop's thread: send it now
+//
+// What resumeDrain does for a connection a worker handed back, without the queue and the eventfd -
+// for a request that ran as a coroutine of this loop.
+//
+void corHttpResumeHere(CorHttpConn* connP)
+{
+  CorHttpServer* serverP = connP->serverP;
+
+  connP->state = COR_HTTP_CONN_WRITING;
+  epollSet(serverP, connP, EPOLLIN, EPOLL_CTL_ADD);   // ADD: corHttpSuspend removed it
+  responseSend(serverP, connP);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // resumeDrain - send the responses the workers finished with
 //
 static void resumeDrain(CorHttpServer* serverP)
@@ -750,7 +769,11 @@ CorHttpStatus corHttpServe(CorHttpServer* serverP)
     // something, and a broker with no traffic would never notice it had been
     // told to stop.
     //
-    int n = epoll_wait(serverP->epollFd, events, COR_HTTP_MAX_EVENTS, 1000);
+    //
+    // ...or less: a coroutine of this loop waiting with a deadline (corBase corCoLoop) wakes it sooner
+    //
+    int coMs = corCoLoopTimeoutMs();
+    int n    = epoll_wait(serverP->epollFd, events, COR_HTTP_MAX_EVENTS, ((coMs >= 0) && (coMs < 1000)) ? coMs : 1000);
 
     if (n < 0)
     {
@@ -763,6 +786,12 @@ CorHttpStatus corHttpServe(CorHttpServer* serverP)
     {
       void* ptr = events[ix].data.ptr;
 
+      //
+      // A socket a coroutine of this loop waits for (its pointer tagged - corCoLoop): resumed there
+      //
+      if (corCoLoopEvent(ptr, events[ix].events) == true)
+        continue;
+
       if (ptr == NULL)
         acceptAll(serverP);
       else if (ptr == serverP)
@@ -770,6 +799,8 @@ CorHttpStatus corHttpServe(CorHttpServer* serverP)
       else
         connEvent(serverP, (CorHttpConn*) ptr, events[ix].events);
     }
+
+    corCoLoopExpire();                           // the coroutines whose time is up
 
     uint64_t now = corHttpNowMs();
 
@@ -796,6 +827,18 @@ CorHttpStatus corHttpServe(CorHttpServer* serverP)
 void corHttpStop(CorHttpServer* serverP)
 {
   serverP->running = false;
+
+  //
+  // ...and wake the loop now: it notices the flag only when epoll_wait returns, which with nothing to
+  // do is up to a second later - every broker stop paid it (in the functests, ~1 s a broker). The
+  // eventfd is the one the workers wake it with; an empty resume queue is nothing to drain.
+  //
+  if (serverP->resumeFd != -1)
+  {
+    uint64_t one     = 1;
+    ssize_t  ignored = write(serverP->resumeFd, &one, sizeof(one));
+    (void) ignored;
+  }
 }
 
 
