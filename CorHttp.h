@@ -153,6 +153,7 @@ typedef struct CorHttpConn
   bool                 expectContinue;           // client sent Expect: 100-continue and is waiting
   bool                 continueSent;             // ... and we have already answered it
   bool                 keepAlive;
+  bool                 inCallback;               // internal: inside requestCb - see corHttpResumeHere
   int                  requests;                 // served on this connection
   uint64_t             lastActivity;             // CLOCK_MONOTONIC ms, for the idle sweep
 
@@ -245,6 +246,22 @@ typedef struct CorHttpServer
   CorHttpConn*         resumeHead;
   int                  resumeFd;
 
+  //
+  // Shared accepting (corHttpAcceptShare): ONE loop of a group accepts and deals the connections out,
+  // in turn, to every loop of the group - itself included. A connection dealt to another loop goes
+  // through that loop's hand queue (handV) and its own eventfd (handFd, data.ptr = &handFd): the
+  // socket is then registered by the loop that owns it, as one accepted there would be.
+  //
+  struct CorHttpServer* acceptV;                 // the group, on the accepting loop only; NULL: none
+  int                  acceptN;
+  int                  acceptNext;
+
+  pthread_mutex_t      handMutex;
+  int*                 handV;
+  int                  handCount;
+  int                  handSize;
+  int                  handFd;
+
   bool                 running;
 } CorHttpServer;
 
@@ -258,6 +275,14 @@ extern CorHttpStatus  corHttpInit(CorHttpServer* serverP, unsigned short port, i
 extern CorHttpStatus  corHttpServe(CorHttpServer* serverP);   // runs until corHttpStop
 extern void           corHttpStop(CorHttpServer* serverP);
 extern void           corHttpRelease(CorHttpServer* serverP);
+
+//
+// corHttpAcceptShare - the n loops of serverV on one port: serverV[0] accepts every connection and deals
+// them out in turn, instead of the kernel hashing each to a loop (SO_REUSEPORT), which splits a handful
+// of connections unevenly - 10 and 6 of 16 - and the busier loop queues. After corHttpInit of all n,
+// before corHttpServe.
+//
+extern CorHttpStatus  corHttpAcceptShare(CorHttpServer* serverV, int n);
 
 
 
@@ -290,6 +315,12 @@ extern const char*    corHttpUriParam(CorHttpConn* connP, const char* key);
 //
 extern void           corHttpSuspend(CorHttpConn* connP);
 extern void           corHttpResume(CorHttpConn* connP);
+
+//
+// corHttpResumeHere - corHttpResume for code that runs ON the loop's thread (a coroutine of the loop):
+// the response goes out at once, no queue, no eventfd
+//
+extern void           corHttpResumeHere(CorHttpConn* connP);
 
 
 

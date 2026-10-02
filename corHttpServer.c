@@ -32,12 +32,14 @@
 #include <netinet/in.h>                          // sockaddr_in, INADDR_ANY
 #include <netinet/tcp.h>                         // TCP_NODELAY
 #include <pthread.h>                             // pthread_mutex_*
+#include <stdlib.h>                              // realloc, free
 #include <string.h>                              // memset, strerror
 #include <sys/epoll.h>                           // epoll_create1, epoll_ctl, epoll_wait
 #include <sys/eventfd.h>                         // eventfd
 #include <sys/socket.h>                          // socket, bind, listen, accept4, setsockopt
 #include <unistd.h>                              // read, write, close
 
+#include "corBase/corCoLoop.h"                  // corCoLoopEvent, corCoLoopExpire, corCoLoopTimeoutMs
 #include "corHttp/CorHttp.h"                     // CorHttpServer, CorHttpConn
 #include "corHttp/corHttpInternal.h"             // Own interface
 
@@ -200,6 +202,39 @@ static void connClose(CorHttpServer* serverP, CorHttpConn* connP)
 
 // -----------------------------------------------------------------------------
 //
+// connTake - an accepted socket becomes a connection of this loop
+//
+static void connTake(CorHttpServer* serverP, int fd)
+{
+  //
+  // TCP_NODELAY: responses are small and complete, and Nagle would hold the
+  // last partial segment waiting for more that is never coming - up to 40 ms
+  // added to a response that was ready.
+  //
+  int one = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+  CorHttpConn* connP = corHttpConnGet(serverP, fd);
+
+  if (connP == NULL)
+  {
+    //
+    // Pool exhausted. Closing immediately is the honest answer: accepting it
+    // to hold it in a queue would trade a refused connection for a hung one,
+    // and the client cannot tell the difference until it times out.
+    //
+    close(fd);
+    return;
+  }
+
+  if (epollSet(serverP, connP, EPOLLIN, EPOLL_CTL_ADD) < 0)
+    connClose(serverP, connP);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // acceptAll - drain the listen backlog
 //
 // Loops until EAGAIN because the listener is edge-triggered too: two
@@ -222,29 +257,90 @@ static void acceptAll(CorHttpServer* serverP)
       break;
     }
 
-    //
-    // TCP_NODELAY: responses are small and complete, and Nagle would hold the
-    // last partial segment waiting for more that is never coming - up to 40 ms
-    // added to a response that was ready.
-    //
-    int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    connTake(serverP, fd);
+  }
+}
 
-    CorHttpConn* connP = corHttpConnGet(serverP, fd);
 
-    if (connP == NULL)
+
+// -----------------------------------------------------------------------------
+//
+// acceptDeal - the accepting loop of a group: each new connection to the next loop in turn
+//
+static void acceptDeal(CorHttpServer* serverP)
+{
+  while (true)
+  {
+    int fd = accept4(serverP->listenFd, NULL, NULL, SOCK_NONBLOCK);
+
+    if (fd < 0)
     {
-      //
-      // Pool exhausted. Closing immediately is the honest answer: accepting it
-      // to hold it in a queue would trade a refused connection for a hung one,
-      // and the client cannot tell the difference until it times out.
-      //
-      close(fd);
+      if (errno == EINTR)
+        continue;
+      break;                                     // EAGAIN: the backlog is drained
+    }
+
+    CorHttpServer* toP = &serverP->acceptV[serverP->acceptNext];
+
+    serverP->acceptNext = (serverP->acceptNext + 1) % serverP->acceptN;
+
+    if (toP == serverP)
+    {
+      connTake(serverP, fd);
       continue;
     }
 
-    if (epollSet(serverP, connP, EPOLLIN, EPOLL_CTL_ADD) < 0)
-      connClose(serverP, connP);
+    pthread_mutex_lock(&toP->handMutex);
+
+    if (toP->handCount == toP->handSize)
+    {
+      int  size = (toP->handSize == 0) ? 64 : toP->handSize * 2;
+      int* v    = realloc(toP->handV, size * sizeof(int));
+
+      if (v == NULL)
+      {
+        pthread_mutex_unlock(&toP->handMutex);
+        close(fd);
+        continue;
+      }
+      toP->handV    = v;
+      toP->handSize = size;
+    }
+
+    toP->handV[toP->handCount++] = fd;
+    pthread_mutex_unlock(&toP->handMutex);
+
+    uint64_t one     = 1;
+    ssize_t  ignored = write(toP->handFd, &one, sizeof(one));
+    (void) ignored;
+  }
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// handDrain - the connections the accepting loop dealt to this one
+//
+static void handDrain(CorHttpServer* serverP)
+{
+  uint64_t counter;
+  ssize_t  ignored = read(serverP->handFd, &counter, sizeof(counter));
+  (void) ignored;
+
+  while (true)
+  {
+    int fd = -1;
+
+    pthread_mutex_lock(&serverP->handMutex);
+    if (serverP->handCount > 0)
+      fd = serverP->handV[--serverP->handCount];
+    pthread_mutex_unlock(&serverP->handMutex);
+
+    if (fd < 0)
+      return;
+
+    connTake(serverP, fd);
   }
 }
 
@@ -429,7 +525,9 @@ static void requestReady(CorHttpServer* serverP, CorHttpConn* connP)
   }
 
   connP->statusCode = 0;
+  connP->inCallback = true;
   serverP->requestCb(connP);
+  connP->inCallback = false;
 
   //
   // A callback that suspended has taken ownership: a worker thread will answer,
@@ -495,6 +593,33 @@ void corHttpResume(CorHttpConn* connP)
     ssize_t  ignored = write(serverP->resumeFd, &one, sizeof(one));
     (void) ignored;                              // a full counter means the loop is already awake
   }
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// corHttpResumeHere - the response is ready, and this IS the loop's thread: send it now
+//
+// What resumeDrain does for a connection a worker handed back, without the queue and the eventfd -
+// for a request that ran as a coroutine of this loop.
+//
+void corHttpResumeHere(CorHttpConn* connP)
+{
+  CorHttpServer* serverP = connP->serverP;
+
+  connP->state = COR_HTTP_CONN_WRITING;
+  epollSet(serverP, connP, EPOLLIN, EPOLL_CTL_ADD);   // ADD: corHttpSuspend removed it
+
+  //
+  // Still inside the callback - a coroutine that finished without ever waiting: requestReady sends the
+  // response when the callback returns, as for any answer given there. Sent here as well, it went out
+  // twice - the second an empty one, which a keep-alive client took for its next request's answer.
+  //
+  if (connP->inCallback == true)
+    return;
+
+  responseSend(serverP, connP);
 }
 
 
@@ -666,7 +791,9 @@ CorHttpStatus corHttpInit(CorHttpServer* serverP, unsigned short port, int connP
   serverP->epollFd          = -1;
   serverP->resumeFd         = -1;
   serverP->resumeHead       = NULL;
+  serverP->handFd           = -1;
   pthread_mutex_init(&serverP->resumeMutex, NULL);   // after the memset, not a static initialiser
+  pthread_mutex_init(&serverP->handMutex, NULL);
 
   if (cb == NULL)
     return CorHttpError;
@@ -750,7 +877,11 @@ CorHttpStatus corHttpServe(CorHttpServer* serverP)
     // something, and a broker with no traffic would never notice it had been
     // told to stop.
     //
-    int n = epoll_wait(serverP->epollFd, events, COR_HTTP_MAX_EVENTS, 1000);
+    //
+    // ...or less: a coroutine of this loop waiting with a deadline (corBase corCoLoop) wakes it sooner
+    //
+    int coMs = corCoLoopTimeoutMs();
+    int n    = epoll_wait(serverP->epollFd, events, COR_HTTP_MAX_EVENTS, ((coMs >= 0) && (coMs < 1000)) ? coMs : 1000);
 
     if (n < 0)
     {
@@ -763,13 +894,25 @@ CorHttpStatus corHttpServe(CorHttpServer* serverP)
     {
       void* ptr = events[ix].data.ptr;
 
-      if (ptr == NULL)
+      //
+      // A socket a coroutine of this loop waits for (its pointer tagged - corCoLoop): resumed there
+      //
+      if (corCoLoopEvent(ptr, events[ix].events) == true)
+        continue;
+
+      if ((ptr == NULL) && (serverP->acceptV != NULL))
+        acceptDeal(serverP);
+      else if (ptr == NULL)
         acceptAll(serverP);
+      else if (ptr == &serverP->handFd)
+        handDrain(serverP);
       else if (ptr == serverP)
         resumeDrain(serverP);
       else
         connEvent(serverP, (CorHttpConn*) ptr, events[ix].events);
     }
+
+    corCoLoopExpire();                           // the coroutines whose time is up
 
     uint64_t now = corHttpNowMs();
 
@@ -796,6 +939,18 @@ CorHttpStatus corHttpServe(CorHttpServer* serverP)
 void corHttpStop(CorHttpServer* serverP)
 {
   serverP->running = false;
+
+  //
+  // ...and wake the loop now: it notices the flag only when epoll_wait returns, which with nothing to
+  // do is up to a second later - every broker stop paid it (in the functests, ~1 s a broker). The
+  // eventfd is the one the workers wake it with; an empty resume queue is nothing to drain.
+  //
+  if (serverP->resumeFd != -1)
+  {
+    uint64_t one     = 1;
+    ssize_t  ignored = write(serverP->resumeFd, &one, sizeof(one));
+    (void) ignored;
+  }
 }
 
 
@@ -806,6 +961,21 @@ void corHttpStop(CorHttpServer* serverP)
 //
 void corHttpRelease(CorHttpServer* serverP)
 {
+  if (serverP->handFd != -1)
+  {
+    close(serverP->handFd);
+    serverP->handFd = -1;
+  }
+
+  for (int ix = 0; ix < serverP->handCount; ix++)
+    close(serverP->handV[ix]);                   // dealt, never taken
+
+  free(serverP->handV);
+  serverP->handV     = NULL;
+  serverP->handCount = 0;
+  serverP->handSize  = 0;
+  pthread_mutex_destroy(&serverP->handMutex);
+
   if (serverP->resumeFd != -1)
   {
     close(serverP->resumeFd);
@@ -827,4 +997,45 @@ void corHttpRelease(CorHttpServer* serverP)
   }
 
   corHttpConnPoolRelease(serverP);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// corHttpAcceptShare -
+//
+// The other loops give up their listeners - the kernel would otherwise still hash connections to them
+// (SO_REUSEPORT) - and each gets the eventfd its dealt connections arrive on.
+//
+CorHttpStatus corHttpAcceptShare(CorHttpServer* serverV, int n)
+{
+  if (n < 2)
+    return CorHttpOk;
+
+  for (int ix = 1; ix < n; ix++)
+  {
+    CorHttpServer*     serverP = &serverV[ix];
+    struct epoll_event ev;
+
+    if ((serverP->handFd = eventfd(0, EFD_NONBLOCK)) < 0)
+      return CorHttpError;
+
+    memset(&ev, 0, sizeof(ev));
+    ev.events   = EPOLLIN;
+    ev.data.ptr = &serverP->handFd;              // the hand eventfd
+
+    if (epoll_ctl(serverP->epollFd, EPOLL_CTL_ADD, serverP->handFd, &ev) < 0)
+      return CorHttpError;
+
+    epoll_ctl(serverP->epollFd, EPOLL_CTL_DEL, serverP->listenFd, NULL);
+    close(serverP->listenFd);
+    serverP->listenFd = -1;
+  }
+
+  serverV[0].acceptV    = serverV;
+  serverV[0].acceptN    = n;
+  serverV[0].acceptNext = 0;
+
+  return CorHttpOk;
 }

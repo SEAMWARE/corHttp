@@ -15,7 +15,7 @@ decides everything from there. Routing belongs to the layer that owns the
 service table; putting it here would mean two of them. Dropping JSON drops a
 dependency and leaves the engine dealing in bytes.
 
-The only dependencies are **corAlloc and libc**.
+The only dependencies are **corAlloc, corBase and libc**.
 
 ## Design
 
@@ -43,6 +43,21 @@ socket until it is drained; edge triggering reports the transition once, so
 every accept and every read loops until `EAGAIN` and nothing may return early
 having done some. One thread means no lock on the connection pool, no atomic on
 the free list, and no way to interleave two responses on one socket.
+
+**Several loops on one port, one of them accepting.** A server is one loop on one
+thread; more cores take more servers on the same port. Each holds a listen socket
+of its own (`SO_REUSEPORT`), and left to that the kernel hashes every new
+connection to one of them - which splits a handful of connections unevenly: 16
+came out as 10 and 6, 11 and 5. `corHttpAcceptShare()` makes one loop of the group
+accept every connection and deal them out in turn, itself included, through a
+queue and an eventfd of each loop's own; the others close their listeners. A
+connection still belongs to one loop for its whole life.
+
+**Coroutines on the loop.** The loop runs corBase's `corCoLoop`: a coroutine of the
+loop that waits - for a socket, or for time - hands its fd to the loop's epoll set
+(the event pointer tagged) and yields, and the loop resumes it when the fd is ready
+or its deadline passes. A request the caller ran as a coroutine is answered with
+`corHttpResumeHere()`, on the loop's own thread: no queue, no eventfd.
 
 **Connections are pooled and reused**, allocated once at startup. Read buffers
 grow on demand and are never shrunk, so the pool converges on the working set
@@ -120,7 +135,8 @@ Two sibling repos, and libc. No libmicrohttpd, no OpenSSL, no JSON library.
 
 - [`corAlloc`](https://github.com/SEAMWARE/corAlloc) — arena allocator (`CorAlloc`),
   used for the per-request pool on each connection
-- [`corBase`](https://github.com/SEAMWARE/corBase) — the library log corAlloc logs through
+- [`corBase`](https://github.com/SEAMWARE/corBase) — the library log corAlloc logs through, and
+  `corCoLoop`, the coroutines' waits and timers on the loop
 
 The layout is the build contract, as everywhere in this stack: repos are
 siblings, sources compile with `-I..` and consumers link
