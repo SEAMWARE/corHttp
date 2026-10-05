@@ -516,6 +516,8 @@ CorHttpStatus corHttpParse(CorHttpConn* connP)
 
   uriParams(connP);
 
+  connP->requestEnd = (int) (p - connP->buf);        // no body: the request ends with its blank line
+
   if ((connP->contentLength > 0) && (connP->bodyRefused == false))
   {
     if ((int) (end - p) < connP->contentLength)
@@ -523,6 +525,7 @@ CorHttpStatus corHttpParse(CorHttpConn* connP)
 
     connP->body.s   = p;
     connP->body.len = connP->contentLength;
+    connP->requestEnd = (int) (p - connP->buf) + connP->contentLength;
 
     //
     // Terminate the body too. It is the last thing in the buffer, and the byte

@@ -150,6 +150,18 @@ typedef struct CorHttpConn
   CorAlloc             alloc;
   char                 allocBuf[8 * 1024];
 
+  //
+  // Where the request ends in buf: the bytes after it (bufUsed - requestEnd) arrived behind it - for an
+  // upgrade, the first bytes of the new protocol. Set by the parser.
+  //
+  int                  requestEnd;
+
+  //
+  // An upgrade the callback accepted (corHttpUpgrade): who gets the socket once the 101 is written
+  //
+  void               (*upgradeCb)(int fd, char* extra, int extraLen, void* cls);
+  void*                upgradeCls;
+
   bool                 expectContinue;           // client sent Expect: 100-continue and is waiting
   bool                 continueSent;             // ... and we have already answered it
   bool                 keepAlive;
@@ -335,5 +347,23 @@ extern void           corHttpResumeHere(CorHttpConn* connP);
 extern void           corHttpResponseStatus(CorHttpConn* connP, int statusCode);
 extern void           corHttpResponseHeader(CorHttpConn* connP, const char* key, const char* value);
 extern void           corHttpResponseBody(CorHttpConn* connP, char* body, int bodyLen);
+
+
+
+// -----------------------------------------------------------------------------
+//
+// corHttpUpgrade - the request switches this connection to another protocol (WebSocket, ...)
+//
+// Called by the callback that answers an upgrade request, after it set the 101 and the headers the
+// protocol's handshake needs (corHttpResponseStatus(connP, 101), "Upgrade", "Connection: Upgrade", ...).
+// Once the 101 is written, the connection leaves this server: its socket is taken out of the loop, the
+// connection goes back to the pool WITHOUT closing it, and 'cb' is called on the loop's thread with the
+// socket and whatever the client sent behind the request (the new protocol's first bytes - valid only
+// during the call: copy them). From then on the socket is the caller's, to read, write and close.
+// The libmicrohttpd counterpart is MHD_create_response_for_upgrade - the same contract.
+//
+typedef void (*CorHttpUpgradeCb)(int fd, char* extra, int extraLen, void* cls);
+
+extern void           corHttpUpgrade(CorHttpConn* connP, CorHttpUpgradeCb cb, void* cls);
 
 #endif  // CORHTTP_CORHTTP_H_
