@@ -181,6 +181,10 @@ void corHttpConnReset(CorHttpConn* connP)
   connP->writeLen           = 0;
   connP->writePos           = 0;
 
+  connP->requestEnd         = 0;
+  connP->upgradeCb          = NULL;
+  connP->upgradeCls         = NULL;
+
   corAllocBufferReset(&connP->alloc, true);
 }
 

@@ -418,6 +418,57 @@ static CorHttpStatus writeAll(CorHttpConn* connP)
 
 // -----------------------------------------------------------------------------
 //
+// upgradeHand - the 101 is written: the socket leaves this server, to the caller's upgrade callback
+//
+// The bytes the client sent behind the request are copied out first - they live in the read buffer,
+// which goes back to the pool with the connection. The connection is put back with fd -1, so it is
+// not closed: the socket is the callback's now.
+//
+static void upgradeHand(CorHttpServer* serverP, CorHttpConn* connP)
+{
+  CorHttpUpgradeCb cb       = connP->upgradeCb;
+  void*            cls      = connP->upgradeCls;
+  int              fd       = connP->fd;
+  int              extraLen = connP->bufUsed - connP->requestEnd;
+  char*            extra    = NULL;
+
+  if (extraLen > 0)
+  {
+    extra = (char*) malloc(extraLen);
+    if (extra != NULL)
+      memcpy(extra, &connP->buf[connP->requestEnd], extraLen);
+    else
+      extraLen = 0;
+  }
+  else
+    extraLen = 0;
+
+  requestDone(serverP, connP);
+  epoll_ctl(serverP->epollFd, EPOLL_CTL_DEL, fd, NULL);
+
+  connP->fd = -1;
+  corHttpConnPut(serverP, connP);
+
+  cb(fd, extra, extraLen, cls);
+  free(extra);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// corHttpUpgrade -
+//
+void corHttpUpgrade(CorHttpConn* connP, CorHttpUpgradeCb cb, void* cls)
+{
+  connP->upgradeCb  = cb;
+  connP->upgradeCls = cls;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // responseSend - render and write, and decide what happens to the connection
 //
 static void responseSend(CorHttpServer* serverP, CorHttpConn* connP)
@@ -445,6 +496,12 @@ static void responseSend(CorHttpServer* serverP, CorHttpConn* connP)
 
   connP->requests++;
   connP->lastActivity = corHttpNowMs();
+
+  if (connP->upgradeCb != NULL)
+  {
+    upgradeHand(serverP, connP);
+    return;
+  }
 
   requestDone(serverP, connP);
 
@@ -689,6 +746,12 @@ static void connEvent(CorHttpServer* serverP, CorHttpConn* connP, uint32_t event
 
     connP->requests++;
     connP->lastActivity = corHttpNowMs();
+
+    if (connP->upgradeCb != NULL)
+    {
+      upgradeHand(serverP, connP);
+      return;
+    }
 
     requestDone(serverP, connP);
 

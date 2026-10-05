@@ -63,6 +63,7 @@ static const char* reasonPhrase(int code)
   switch (code)
   {
   case 100: return "Continue";
+  case 101: return "Switching Protocols";
   case 200: return "OK";
   case 201: return "Created";
   case 202: return "Accepted";
