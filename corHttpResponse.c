@@ -207,7 +207,7 @@ CorHttpStatus corHttpResponseRender(CorHttpConn* connP)
   int size = 64;                                 // status line, comfortably
 
   size += 40;                                    // Date
-  size += 21;                                    // Connection: close
+  size += 21;                                    // Connection: close / Connection: Upgrade
   size += 32;                                    // Content-Length
 
   for (int ix = 0; ix < connP->respHeaders; ix++)
@@ -236,7 +236,15 @@ CorHttpStatus corHttpResponseRender(CorHttpConn* connP)
   httpDate(dateBuf, sizeof(dateBuf));
   p += snprintf(p, end - p, "Date: %s\r\n", dateBuf);
 
-  if (connP->keepAlive == false)
+  //
+  // 101 Switching Protocols: the server's own Connection: Upgrade (RFC 9110 § 7.8, RFC 6455 § 4.2.2 - "MUST
+  // include a Connection header field with value Upgrade"), as libmicrohttpd writes it - the upgrading
+  // party (a WebSocket transport) adds only its own headers, and the header comes once on either server.
+  // Never Connection: close on it: the connection is handed over, not closed.
+  //
+  if (connP->statusCode == 101)
+    p += snprintf(p, end - p, "Connection: Upgrade\r\n");
+  else if (connP->keepAlive == false)
     p += snprintf(p, end - p, "Connection: close\r\n");
 
   for (int ix = 0; ix < connP->respHeaders; ix++)
