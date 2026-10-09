@@ -71,6 +71,15 @@ $(OBJDIR)/$(TEST): corHttpTest.c $(OBJDIR)/$(LIB) $(OBJDIR)/.flags
 	$(CC) $(CFLAGS) -o $@ corHttpTest.c $(OBJDIR)/$(LIB) $(LIBS)
 
 #
+# listenTest - where and how a server listens (bind address, SO_REUSEPORT); built and run
+#
+listenTest: $(OBJDIR)/$(LIB)
+	$(CC) $(CFLAGS) -o $(OBJDIR)/listenTest test/listenTest.c $(OBJDIR)/$(LIB) $(LIBS)
+	$(OBJDIR)/listenTest
+
+.PHONY: listenTest
+
+#
 # $(OBJDIR)/.flags - rebuild when the COMPILE LINE changes
 #
 # A flag change is invisible to every timestamp: the sources are older than the
