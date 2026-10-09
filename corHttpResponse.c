@@ -68,6 +68,7 @@ static const char* reasonPhrase(int code)
   case 201: return "Created";
   case 202: return "Accepted";
   case 204: return "No Content";
+  case 206: return "Partial Content";
   case 207: return "Multi-Status";
   case 400: return "Bad Request";
   case 403: return "Forbidden";
@@ -78,6 +79,7 @@ static const char* reasonPhrase(int code)
   case 411: return "Length Required";
   case 413: return "Content Too Large";
   case 415: return "Unsupported Media Type";
+  case 416: return "Range Not Satisfiable";
   case 422: return "Unprocessable Content";
   case 431: return "Request Header Fields Too Large";
   case 500: return "Internal Server Error";
