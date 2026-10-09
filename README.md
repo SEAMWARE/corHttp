@@ -45,13 +45,23 @@ having done some. One thread means no lock on the connection pool, no atomic on
 the free list, and no way to interleave two responses on one socket.
 
 **Several loops on one port, one of them accepting.** A server is one loop on one
-thread; more cores take more servers on the same port. Each holds a listen socket
-of its own (`SO_REUSEPORT`), and left to that the kernel hashes every new
+thread; more cores take more servers on the same port. Each can hold a listen socket
+of its own (`SO_REUSEPORT`, asked for with `corHttpInitOptions()` and `reusePort`),
+and left to that the kernel hashes every new
 connection to one of them - which splits a handful of connections unevenly: 16
 came out as 10 and 6, 11 and 5. `corHttpAcceptShare()` makes one loop of the group
 accept every connection and deal them out in turn, itself included, through a
-queue and an eventfd of each loop's own; the others close their listeners. A
+queue and an eventfd of each loop's own; the others close their listeners - or
+never open one (`noListener`), and the port then needs no `SO_REUSEPORT`. A
 connection still belongs to one loop for its whole life.
+
+**A port in use is an error.** `corHttpInit()` listens on every IPv4 interface
+without `SO_REUSEPORT`, so a second server on a port that is taken fails to start
+(`EADDRINUSE`) instead of quietly receiving part of the first one's connections.
+`corHttpInitOptions()` takes a `CorHttpListenOptions`: `bindAddress`, one numeric
+IPv4 or IPv6 address to listen on (`"127.0.0.1"`, `"::1"`); `reusePort`, for servers
+that share a port, each of which must ask for it; and `noListener`, for a loop that
+is handed its connections by an accepting loop (`corHttpAcceptShare()`).
 
 **Coroutines on the loop.** The loop runs corBase's `corCoLoop`: a coroutine of the
 loop that waits - for a socket, or for time - hands its fd to the loop's epoll set
@@ -103,6 +113,7 @@ would be worse than one that has none.
 make            # libcorHttp.a, libcorHttp.so
 make di         # ... and install
 make corHttpTest
+make listenTest  # bind address and SO_REUSEPORT
 ```
 
 `corHttpTest` is a server that echoes back what it parsed — method, path, query,

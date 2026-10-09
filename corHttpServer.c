@@ -29,7 +29,8 @@
 
 #include <errno.h>                               // errno, EAGAIN, EWOULDBLOCK, EINTR
 #include <fcntl.h>                               // fcntl, O_NONBLOCK
-#include <netinet/in.h>                          // sockaddr_in, INADDR_ANY
+#include <arpa/inet.h>                          // inet_pton
+#include <netinet/in.h>                          // sockaddr_in, sockaddr_in6, INADDR_ANY
 #include <netinet/tcp.h>                         // TCP_NODELAY
 #include <pthread.h>                             // pthread_mutex_*
 #include <stdlib.h>                              // realloc, free
@@ -77,9 +78,52 @@ static int nonBlocking(int fd)
 //
 // listener - a bound, listening, non-blocking socket
 //
-static int listener(unsigned short port)
+// On every IPv4 interface without a bind address, else on the one address given (a numeric IPv4 or
+// IPv6 address - not a host name, which may resolve to more than one, or to the other family).
+//
+static int listener(unsigned short port, const CorHttpListenOptions* optionsP)
 {
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  const char*             bindAddress = (optionsP != NULL) ? optionsP->bindAddress : NULL;
+  bool                    reusePort   = (optionsP != NULL) ? optionsP->reusePort   : false;
+  struct sockaddr_storage addr;
+  socklen_t               addrLen;
+
+  memset(&addr, 0, sizeof(addr));
+
+  if ((bindAddress == NULL) || (bindAddress[0] == 0))
+  {
+    struct sockaddr_in* in4P = (struct sockaddr_in*) &addr;
+
+    in4P->sin_family      = AF_INET;
+    in4P->sin_addr.s_addr = INADDR_ANY;
+    in4P->sin_port        = htons(port);
+    addrLen               = sizeof(struct sockaddr_in);
+  }
+  else
+  {
+    struct sockaddr_in*  in4P = (struct sockaddr_in*)  &addr;
+    struct sockaddr_in6* in6P = (struct sockaddr_in6*) &addr;
+
+    if (inet_pton(AF_INET, bindAddress, &in4P->sin_addr) == 1)
+    {
+      in4P->sin_family = AF_INET;
+      in4P->sin_port   = htons(port);
+      addrLen          = sizeof(struct sockaddr_in);
+    }
+    else if (inet_pton(AF_INET6, bindAddress, &in6P->sin6_addr) == 1)
+    {
+      in6P->sin6_family = AF_INET6;
+      in6P->sin6_port   = htons(port);
+      addrLen           = sizeof(struct sockaddr_in6);
+    }
+    else
+    {
+      errno = EINVAL;
+      return -1;
+    }
+  }
+
+  int fd = socket(addr.ss_family, SOCK_STREAM, 0);
 
   if (fd < 0)
     return -1;
@@ -93,31 +137,32 @@ static int listener(unsigned short port)
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 
   //
-  // SO_REUSEPORT so that MORE THAN ONE server can hold this port, each with its
-  // own listen socket, its own epoll and its own thread. The kernel then hashes
-  // each incoming connection to one of them, and a connection belongs to one
-  // loop for its whole life - which keeps the invariant that makes the writes
-  // safe (one connection, one writer, one answer at a time) rather than
-  // weakening it.
+  // SO_REUSEPORT only when asked for (reusePort): it is what lets MORE THAN ONE
+  // server hold this port, each with its own listen socket, its own epoll and its
+  // own thread - the loops of one process (corHttpAcceptShare). It lets a second
+  // PROCESS of the same user hold the port as well, and the kernel then hashes the
+  // connections between the two, so without it a second server on a port in use
+  // fails to bind (EADDRINUSE) instead of silently getting part of the traffic.
   //
-  // Harmless with a single server, which is why it is unconditional: one holder
-  // of a port behaves exactly as before.
+  // A failure to set it is fatal: the caller asked for a shared port and the next
+  // server's bind would fail instead.
   //
-  // Not fatal if it fails. An older kernel without SO_REUSEPORT still runs one
-  // loop perfectly well, and that is better than refusing to start.
-  //
+  if (reusePort == true)
+  {
 #ifdef SO_REUSEPORT
-  setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) < 0)
+    {
+      close(fd);
+      return -1;
+    }
+#else
+    close(fd);
+    errno = ENOPROTOOPT;
+    return -1;
 #endif
+  }
 
-  struct sockaddr_in addr;
-
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family      = AF_INET;
-  addr.sin_addr.s_addr = INADDR_ANY;
-  addr.sin_port        = htons(port);
-
-  if (bind(fd, (struct sockaddr*) &addr, sizeof(addr)) < 0)
+  if (bind(fd, (struct sockaddr*) &addr, addrLen) < 0)
   {
     close(fd);
     return -1;
@@ -844,6 +889,17 @@ static void idleSweep(CorHttpServer* serverP)
 //
 CorHttpStatus corHttpInit(CorHttpServer* serverP, unsigned short port, int connPoolSize, CorHttpRequestCb cb)
 {
+  return corHttpInitOptions(serverP, port, NULL, connPoolSize, cb);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// corHttpInitOptions -
+//
+CorHttpStatus corHttpInitOptions(CorHttpServer* serverP, unsigned short port, const CorHttpListenOptions* optionsP, int connPoolSize, CorHttpRequestCb cb)
+{
   memset(serverP, 0, sizeof(*serverP));
 
   serverP->port             = port;
@@ -866,7 +922,9 @@ CorHttpStatus corHttpInit(CorHttpServer* serverP, unsigned short port, int connP
   if (s != CorHttpOk)
     return s;
 
-  if ((serverP->listenFd = listener(port)) < 0)
+  bool noListener = (optionsP != NULL) && (optionsP->noListener == true);
+
+  if ((noListener == false) && ((serverP->listenFd = listener(port, optionsP)) < 0))
   {
     corHttpConnPoolRelease(serverP);
     return CorHttpError;
@@ -874,7 +932,8 @@ CorHttpStatus corHttpInit(CorHttpServer* serverP, unsigned short port, int connP
 
   if ((serverP->epollFd = epoll_create1(0)) < 0)
   {
-    close(serverP->listenFd);
+    if (serverP->listenFd != -1)
+      close(serverP->listenFd);
     corHttpConnPoolRelease(serverP);
     return CorHttpError;
   }
@@ -892,7 +951,7 @@ CorHttpStatus corHttpInit(CorHttpServer* serverP, unsigned short port, int connP
   ev.events   = EPOLLIN;
   ev.data.ptr = NULL;                            // NULL = the listener
 
-  if (epoll_ctl(serverP->epollFd, EPOLL_CTL_ADD, serverP->listenFd, &ev) < 0)
+  if ((noListener == false) && (epoll_ctl(serverP->epollFd, EPOLL_CTL_ADD, serverP->listenFd, &ev) < 0))
   {
     corHttpRelease(serverP);
     return CorHttpError;
@@ -1068,8 +1127,8 @@ void corHttpRelease(CorHttpServer* serverP)
 //
 // corHttpAcceptShare -
 //
-// The other loops give up their listeners - the kernel would otherwise still hash connections to them
-// (SO_REUSEPORT) - and each gets the eventfd its dealt connections arrive on.
+// The other loops give up their listeners, if they have one - the kernel would otherwise still hash
+// connections to them (SO_REUSEPORT) - and each gets the eventfd its dealt connections arrive on.
 //
 CorHttpStatus corHttpAcceptShare(CorHttpServer* serverV, int n)
 {
@@ -1091,9 +1150,12 @@ CorHttpStatus corHttpAcceptShare(CorHttpServer* serverV, int n)
     if (epoll_ctl(serverP->epollFd, EPOLL_CTL_ADD, serverP->handFd, &ev) < 0)
       return CorHttpError;
 
-    epoll_ctl(serverP->epollFd, EPOLL_CTL_DEL, serverP->listenFd, NULL);
-    close(serverP->listenFd);
-    serverP->listenFd = -1;
+    if (serverP->listenFd != -1)                 // a loop with no listener of its own (noListener) has none to give up
+    {
+      epoll_ctl(serverP->epollFd, EPOLL_CTL_DEL, serverP->listenFd, NULL);
+      close(serverP->listenFd);
+      serverP->listenFd = -1;
+    }
   }
 
   serverV[0].acceptV    = serverV;

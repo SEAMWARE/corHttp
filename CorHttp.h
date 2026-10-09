@@ -281,9 +281,35 @@ typedef struct CorHttpServer
 
 // -----------------------------------------------------------------------------
 //
+// CorHttpListenOptions - where and how a server listens (corHttpInitOptions)
+//
+// bindAddress  NULL or "": every IPv4 interface (0.0.0.0), what corHttpInit does. Else ONE numeric
+//              IPv4 or IPv6 address ("127.0.0.1", "::1", "::") - not a host name.
+// reusePort    SO_REUSEPORT on the listen socket: more than one server may hold the port - every one
+//              of them must ask for it - and the kernel hashes the connections between them. It lets
+//              a second process of the same user hold the port as well. Without it a second server on
+//              a port in use fails (CorHttpError, errno EADDRINUSE). corHttpInit: false.
+// noListener   no listen socket at all (port and the other options unused): a loop of a group that is
+//              handed its connections by the group's accepting loop (corHttpAcceptShare). The loops
+//              of a group then need no SO_REUSEPORT. corHttpInit: false.
+//
+typedef struct CorHttpListenOptions
+{
+  const char*          bindAddress;
+  bool                 reusePort;
+  bool                 noListener;
+} CorHttpListenOptions;
+
+
+
+// -----------------------------------------------------------------------------
+//
 // Server lifecycle
 //
+// corHttpInit is corHttpInitOptions with no options: every IPv4 interface, no SO_REUSEPORT.
+//
 extern CorHttpStatus  corHttpInit(CorHttpServer* serverP, unsigned short port, int connPoolSize, CorHttpRequestCb cb);
+extern CorHttpStatus  corHttpInitOptions(CorHttpServer* serverP, unsigned short port, const CorHttpListenOptions* optionsP, int connPoolSize, CorHttpRequestCb cb);
 extern CorHttpStatus  corHttpServe(CorHttpServer* serverP);   // runs until corHttpStop
 extern void           corHttpStop(CorHttpServer* serverP);
 extern void           corHttpRelease(CorHttpServer* serverP);
@@ -291,8 +317,9 @@ extern void           corHttpRelease(CorHttpServer* serverP);
 //
 // corHttpAcceptShare - the n loops of serverV on one port: serverV[0] accepts every connection and deals
 // them out in turn, instead of the kernel hashing each to a loop (SO_REUSEPORT), which splits a handful
-// of connections unevenly - 10 and 6 of 16 - and the busier loop queues. After corHttpInit of all n,
-// before corHttpServe.
+// of connections unevenly - 10 and 6 of 16 - and the busier loop queues. After corHttpInit of serverV[0]
+// and corHttpInitOptions of the others with noListener (or of all n with reusePort), before
+// corHttpServe.
 //
 extern CorHttpStatus  corHttpAcceptShare(CorHttpServer* serverV, int n);
 
