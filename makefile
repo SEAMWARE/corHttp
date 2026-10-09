@@ -23,6 +23,7 @@ DFLAGS        =
 CFLAGS        = -O2 -Wall -Werror -Wundef -fPIC -Wno-unused-function -fstack-protector-all $(DFLAGS) $(INCLUDE) -MMD -MP $(EXTRA_CFLAGS)
 
 LIB_SOURCES   = corHttpConn.c     \
+                corHttpStream.c   \
                 corHttpParse.c    \
                 corHttpResponse.c \
                 corHttpServer.c
@@ -77,7 +78,15 @@ listenTest: $(OBJDIR)/$(LIB)
 	$(CC) $(CFLAGS) -o $(OBJDIR)/listenTest test/listenTest.c $(OBJDIR)/$(LIB) $(LIBS)
 	$(OBJDIR)/listenTest
 
-.PHONY: listenTest
+#
+# streamTest - bodies not in memory: a file (corHttpResponseFile) and a stream (corHttpResponseStream);
+# built and run
+#
+streamTest: $(OBJDIR)/$(LIB)
+	$(CC) $(CFLAGS) -o $(OBJDIR)/streamTest test/streamTest.c $(OBJDIR)/$(LIB) $(LIBS)
+	$(OBJDIR)/streamTest
+
+.PHONY: listenTest streamTest
 
 #
 # $(OBJDIR)/.flags - rebuild when the COMPILE LINE changes

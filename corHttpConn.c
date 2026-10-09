@@ -83,6 +83,7 @@ CorHttpStatus corHttpConnPoolInit(CorHttpServer* serverP, int size)
 
     connP->bufSize = COR_HTTP_INITIAL_BUF_SIZE;
     connP->fd      = -1;
+    connP->fileFd  = -1;                         // not 0: that is a file descriptor too
     connP->serverP = serverP;                    // the pool belongs to one loop for its whole life
     connP->state   = COR_HTTP_CONN_FREE;
 
@@ -125,6 +126,9 @@ void corHttpConnPoolRelease(CorHttpServer* serverP)
       close(connP->fd);
       connP->fd = -1;
     }
+
+    if (connP->state != COR_HTTP_CONN_FREE)       // a free one has none - and one never initialised has fileFd 0
+      corHttpBodyRelease(connP);
   }
 
   free(serverP->connPool);
@@ -185,6 +189,8 @@ void corHttpConnReset(CorHttpConn* connP)
   connP->upgradeCb          = NULL;
   connP->upgradeCls         = NULL;
 
+  corHttpBodyRelease(connP);                     // a file or a stream body, if the last response had one
+
   corAllocBufferReset(&connP->alloc, true);
 }
 
@@ -231,6 +237,8 @@ void corHttpConnPut(CorHttpServer* serverP, CorHttpConn* connP)
 {
   if (connP->state == COR_HTTP_CONN_FREE)
     return;                                      // already returned; a double close would corrupt the free list
+
+  corHttpBodyRelease(connP);                     // the file closed, the stream's writer told the client is gone
 
   if (connP->fd != -1)
   {

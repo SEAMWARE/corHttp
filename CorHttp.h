@@ -179,6 +179,15 @@ typedef struct CorHttpConn
   //
   struct CorHttpServer* serverP;
   struct CorHttpConn*  next;                     // free-list linkage
+
+  //
+  // A body that is not in memory - a file (corHttpResponseFile) or one written over time
+  // (corHttpResponseStream). Internal; see corHttpStream.c.
+  //
+  int                  fileFd;                   // -1: no file
+  int64_t              fileOffset;
+  int64_t              fileLeft;
+  struct CorHttpStream* streamP;                 // NULL: no stream
 } CorHttpConn;
 
 
@@ -275,6 +284,12 @@ typedef struct CorHttpServer
   int                  handFd;
 
   bool                 running;
+
+  //
+  // The stream queue: streams with bytes (or their end) waiting for THIS loop to write them - the
+  // writers' side of corHttpStreamWrite / corHttpStreamEnd. Under resumeMutex, woken through resumeFd.
+  //
+  struct CorHttpStream* streamHead;
 } CorHttpServer;
 
 
@@ -392,5 +407,49 @@ extern void           corHttpResponseBody(CorHttpConn* connP, char* body, int bo
 typedef void (*CorHttpUpgradeCb)(int fd, char* extra, int extraLen, void* cls);
 
 extern void           corHttpUpgrade(CorHttpConn* connP, CorHttpUpgradeCb cb, void* cls);
+
+
+
+// -----------------------------------------------------------------------------
+//
+// corHttpResponseFile - the body is a file, sent from the file without being read into memory
+//
+// 'length' bytes of 'fd' from 'offset' (a Range answer sets its 206 and Content-Range itself), sent with
+// sendfile as the socket takes them; Content-Length is 'length'. The fd is the library's from here on:
+// closed when the bytes are out, or when the connection dies first. A HEAD gets the headers only.
+//
+extern void           corHttpResponseFile(CorHttpConn* connP, int fd, int64_t offset, int64_t length);
+
+
+
+// -----------------------------------------------------------------------------
+//
+// corHttpResponseStream - the body is written over time, after the callback has returned
+//
+// Called by the callback (or by the thread a suspended request was handed to, before corHttpResume),
+// after the status and the headers. The headers go out with `Transfer-Encoding: chunked` in place of
+// Content-Length (an HTTP/1.0 client: no framing, and the connection closes at the end), and the
+// connection stays open for what the stream is given:
+//
+//   corHttpStreamWrite(streamP, data, len)   from ANY thread: the bytes are copied and queued, and the
+//                                            loop writes them as one chunk. false: the client is gone
+//                                            (or the stream is over) - nothing more will reach it.
+//   corHttpStreamEnd(streamP)                from any thread, exactly once - also after a write said
+//                                            false: the last chunk, and the handle is released. Not
+//                                            used after this.
+//
+// The writer never waits for the socket: bytes the client has not taken yet pile up in the stream, up
+// to COR_HTTP_STREAM_PENDING_MAX - a client that falls that far behind is disconnected, and the writes
+// say false. A stream is not closed for being quiet (the idle sweep skips it): a writer with nothing
+// to say for a long time sends something small now and then, or the client cannot tell a stream that
+// is quiet from one that is dead. Server-sent events are this, with text/event-stream.
+//
+#define COR_HTTP_STREAM_PENDING_MAX  (16 * 1024 * 1024)
+
+typedef struct CorHttpStream CorHttpStream;
+
+extern CorHttpStream* corHttpResponseStream(CorHttpConn* connP);
+extern bool           corHttpStreamWrite(CorHttpStream* streamP, const char* data, int len);
+extern void           corHttpStreamEnd(CorHttpStream* streamP);
 
 #endif  // CORHTTP_CORHTTP_H_

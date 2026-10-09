@@ -202,6 +202,24 @@ CorHttpStatus corHttpResponseRender(CorHttpConn* connP)
   bool bodyOut = (connP->method.s != NULL) && (strcmp(connP->method.s, "HEAD") != 0);
 
   //
+  // A body that is not in memory (corHttpStream.c): a file has its length, a stream has none - it goes
+  // out in chunks (HTTP/1.1), or, to an HTTP/1.0 client, raw until the connection closes.
+  //
+  CorHttpStream* streamP = connP->streamP;
+  bool           isFile  = (connP->fileFd != -1);
+
+  if (streamP != NULL)
+  {
+    streamP->chunked = (connP->version.s == NULL) || (strcmp(connP->version.s, "HTTP/1.0") != 0);
+    streamP->started = true;
+
+    if (streamP->chunked == false)
+      connP->keepAlive = false;
+
+    withLength = false;
+  }
+
+  //
   // Size the buffer before writing a byte of it. Every part is known, so
   // guessing and growing would mean a realloc in the middle of rendering, on
   // the one path that runs for every single response.
@@ -210,7 +228,7 @@ CorHttpStatus corHttpResponseRender(CorHttpConn* connP)
 
   size += 40;                                    // Date
   size += 21;                                    // Connection: close / Connection: Upgrade
-  size += 32;                                    // Content-Length
+  size += 40;                                    // Content-Length (a file: up to 19 digits) / Transfer-Encoding
 
   for (int ix = 0; ix < connP->respHeaders; ix++)
     size += connP->respHeader[ix].key.len + connP->respHeader[ix].value.len + 4;
@@ -261,7 +279,11 @@ CorHttpStatus corHttpResponseRender(CorHttpConn* connP)
     *p++ = '\n';
   }
 
-  if (withLength == true)
+  if ((streamP != NULL) && (streamP->chunked == true))
+    p += snprintf(p, end - p, "Transfer-Encoding: chunked\r\n");
+  else if ((withLength == true) && (isFile == true))
+    p += snprintf(p, end - p, "Content-Length: %lld\r\n", (long long) connP->fileLeft);
+  else if (withLength == true)
     p += snprintf(p, end - p, "Content-Length: %d\r\n", connP->respBodyLen);
 
   *p++ = '\r';
@@ -275,6 +297,13 @@ CorHttpStatus corHttpResponseRender(CorHttpConn* connP)
 
   connP->writeLen = (int) (p - connP->writeBuf);
   connP->writePos = 0;
+
+  //
+  // HEAD, or a status that has no body: the file and the stream are let go of here - the file closed,
+  // the stream's writes refused from now on
+  //
+  if (((isFile == true) || (streamP != NULL)) && ((bodyOut == false) || (connP->statusCode == 204) || (connP->statusCode < 200)))
+    corHttpBodyRelease(connP);
 
   return CorHttpOk;
 }
