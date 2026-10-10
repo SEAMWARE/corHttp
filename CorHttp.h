@@ -315,6 +315,14 @@ extern void           corHttpStop(CorHttpServer* serverP);
 extern void           corHttpRelease(CorHttpServer* serverP);
 
 //
+// corHttpServeEnd - after corHttpServe has returned, on its thread: every connection closed but the
+// suspended ones (corHttpSuspend - a request the application still holds). A connection with a request
+// on it - a response not yet all written - gets its doneCb first, as on any close, so the application
+// frees the request. Call it when the application holds no request any more, before corHttpRelease.
+//
+extern void           corHttpServeEnd(CorHttpServer* serverP);
+
+//
 // corHttpAcceptShare - the n loops of serverV on one port: serverV[0] accepts every connection and deals
 // them out in turn, instead of the kernel hashing each to a loop (SO_REUSEPORT), which splits a handful
 // of connections unevenly - 10 and 6 of 16 - and the busier loop queues. After corHttpInit of serverV[0]

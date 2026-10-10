@@ -1052,6 +1052,28 @@ CorHttpStatus corHttpServe(CorHttpServer* serverP)
 
 // -----------------------------------------------------------------------------
 //
+// corHttpServeEnd -
+//
+void corHttpServeEnd(CorHttpServer* serverP)
+{
+  if (serverP->connPool == NULL)
+    return;
+
+  for (int ix = 0; ix < serverP->connPoolSize; ix++)
+  {
+    CorHttpConn* connP = &serverP->connPool[ix];
+
+    if ((connP->state == COR_HTTP_CONN_FREE) || (connP->state == COR_HTTP_CONN_IDLE))   // IDLE: suspended
+      continue;
+
+    connClose(serverP, connP);
+  }
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
 // corHttpStop -
 //
 // Sets a flag and returns. Safe from a signal handler, which is where it is
