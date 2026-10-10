@@ -33,10 +33,12 @@
 #include <netinet/in.h>                          // sockaddr_in, sockaddr_in6, INADDR_ANY
 #include <netinet/tcp.h>                         // TCP_NODELAY
 #include <pthread.h>                             // pthread_mutex_*
+#include <stdio.h>                               // snprintf
 #include <stdlib.h>                              // realloc, free
 #include <string.h>                              // memset, strerror
 #include <sys/epoll.h>                           // epoll_create1, epoll_ctl, epoll_wait
 #include <sys/eventfd.h>                         // eventfd
+#include <sys/sendfile.h>                        // sendfile
 #include <sys/socket.h>                          // socket, bind, listen, accept4, setsockopt
 #include <unistd.h>                              // read, write, close
 
@@ -512,6 +514,208 @@ void corHttpUpgrade(CorHttpConn* connP, CorHttpUpgradeCb cb, void* cls)
 
 
 
+static void responseDone(CorHttpServer* serverP, CorHttpConn* connP);
+
+
+
+// -----------------------------------------------------------------------------
+//
+// chunkFrame - the next bytes of a stream in the write buffer, framed: "<hex length>\r\n<bytes>\r\n",
+// and the terminating "0\r\n\r\n" behind them when the writer has ended. Raw for an HTTP/1.0 client.
+//
+static bool chunkFrame(CorHttpConn* connP, CorHttpStream* sP, char* data, int len, bool last)
+{
+  int size = len + 32;
+
+  free(connP->writeBuf);
+  connP->writeBuf = (char*) malloc(size);
+  connP->writeLen = 0;
+  connP->writePos = 0;
+
+  if (connP->writeBuf == NULL)
+    return false;
+
+  char* p = connP->writeBuf;
+
+  if (len > 0)
+  {
+    if (sP->chunked == true)
+      p += snprintf(p, 16, "%x\r\n", len);
+
+    memcpy(p, data, len);
+    p += len;
+
+    if (sP->chunked == true)
+    {
+      *p++ = '\r';
+      *p++ = '\n';
+    }
+  }
+
+  if ((last == true) && (sP->chunked == true))
+  {
+    memcpy(p, "0\r\n\r\n", 5);
+    p += 5;
+  }
+
+  connP->writeLen = (int) (p - connP->writeBuf);
+  return true;
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// bodyPump - a file or a stream body, after its headers: as much as the socket takes
+//
+// true: the body is complete - the response is over, as an in-memory one is when its buffer is out.
+// false: waiting (for the socket - EPOLLOUT is armed - or for the stream's writer, whose next write
+// wakes the loop), or the connection was closed.
+//
+static bool bodyPump(CorHttpServer* serverP, CorHttpConn* connP)
+{
+  while (true)
+  {
+    CorHttpStatus s = writeAll(connP);
+
+    if (s == CorHttpAgain)
+    {
+      epollSet(serverP, connP, EPOLLIN | EPOLLOUT, EPOLL_CTL_MOD);
+      return false;
+    }
+
+    if (s != CorHttpOk)
+    {
+      connClose(serverP, connP);
+      return false;
+    }
+
+    connP->lastActivity = corHttpNowMs();
+
+    if (connP->fileFd != -1)
+    {
+      while (connP->fileLeft > 0)
+      {
+        off_t   off  = (off_t) connP->fileOffset;
+        size_t  want = (connP->fileLeft > (1 << 30)) ? (1 << 30) : (size_t) connP->fileLeft;
+        ssize_t n    = sendfile(connP->fd, connP->fileFd, &off, want);
+
+        if (n < 0)
+        {
+          if ((errno == EAGAIN) || (errno == EWOULDBLOCK))
+          {
+            epollSet(serverP, connP, EPOLLIN | EPOLLOUT, EPOLL_CTL_MOD);
+            return false;
+          }
+          if (errno == EINTR)
+            continue;
+
+          connClose(serverP, connP);
+          return false;
+        }
+
+        if (n == 0)
+        {
+          //
+          // The file is shorter than the Content-Length already sent: nothing can make the response
+          // right - the client sees the connection close before the length it was promised
+          //
+          connClose(serverP, connP);
+          return false;
+        }
+
+        connP->fileOffset  += n;
+        connP->fileLeft    -= n;
+        connP->lastActivity = corHttpNowMs();
+      }
+
+      corHttpBodyRelease(connP);
+      return true;
+    }
+
+    CorHttpStream* sP = connP->streamP;
+
+    if (sP == NULL)
+      return true;                               // no body of its own (HEAD), or done
+
+    if (sP->lastQueued == true)
+    {
+      corHttpBodyRelease(connP);                 // the terminating chunk is out
+      return true;
+    }
+
+    int   len;
+    bool  ended;
+    bool  overflow;
+    char* data = corHttpStreamTake(sP, &len, &ended, &overflow);
+
+    if (overflow == true)
+    {
+      free(data);
+      connClose(serverP, connP);                 // the client fell too far behind
+      return false;
+    }
+
+    if ((len == 0) && (ended == false))
+    {
+      free(data);
+      return false;                              // the writer's next write wakes the loop
+    }
+
+    bool ok = chunkFrame(connP, sP, data, len, ended);
+    free(data);
+
+    if (ok == false)
+    {
+      connClose(serverP, connP);
+      return false;
+    }
+
+    sP->lastQueued = ended;
+  }
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// streamDrain - the streams whose writers wrote or ended: their connections written to
+//
+static void streamDrain(CorHttpServer* serverP)
+{
+  pthread_mutex_lock(&serverP->resumeMutex);
+  CorHttpStream* sP = serverP->streamHead;
+  serverP->streamHead = NULL;
+  pthread_mutex_unlock(&serverP->resumeMutex);
+
+  while (sP != NULL)
+  {
+    CorHttpStream* nextP = sP->next;
+
+    pthread_mutex_lock(&sP->mutex);
+    sP->queued = false;
+    sP->next   = NULL;
+    pthread_mutex_unlock(&sP->mutex);
+
+    //
+    // The connection, if it is still this stream's and its headers are rendered (a stream started by a
+    // suspended request waits for corHttpResume). The rest of the body follows the response's own path.
+    //
+    CorHttpConn* connP = sP->connP;
+
+    if ((connP != NULL) && (sP->started == true) && (connP->state == COR_HTTP_CONN_WRITING) && (connP->streamP == sP))
+    {
+      if (bodyPump(serverP, connP) == true)
+        responseDone(serverP, connP);
+    }
+
+    corHttpStreamUnref(sP);                      // the queue's reference
+    sP = nextP;
+  }
+}
+
+
+
 // -----------------------------------------------------------------------------
 //
 // responseSend - render and write, and decide what happens to the connection
@@ -539,6 +743,29 @@ static void responseSend(CorHttpServer* serverP, CorHttpConn* connP)
     return;
   }
 
+  //
+  // A file or a stream: the headers are out, the body follows as the socket takes it - or, for a stream,
+  // as its writer writes it
+  //
+  if ((connP->fileFd != -1) || (connP->streamP != NULL))
+  {
+    connP->state = COR_HTTP_CONN_WRITING;
+
+    if (bodyPump(serverP, connP) == false)
+      return;
+  }
+
+  responseDone(serverP, connP);
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// responseDone - the whole response is out: the next request on the connection, or close it
+//
+static void responseDone(CorHttpServer* serverP, CorHttpConn* connP)
+{
   connP->requests++;
   connP->lastActivity = corHttpNowMs();
 
@@ -760,6 +987,37 @@ static void resumeDrain(CorHttpServer* serverP)
 
     connP = nextP;
   }
+
+  streamDrain(serverP);                          // the same eventfd wakes the loop for the streams
+}
+
+
+
+// -----------------------------------------------------------------------------
+//
+// sinkRead - read what the client sent while its response's body is being written, and drop it
+//
+// Not into the read buffer: the request the response answers is still there, and a caller may read it
+// until the request is over (CorHttpDoneCb). false: the client hung up, or the socket failed.
+//
+static bool sinkRead(CorHttpConn* connP)
+{
+  char sink[4096];
+
+  while (true)
+  {
+    ssize_t n = read(connP->fd, sink, sizeof(sink));
+
+    if (n > 0)
+      continue;
+    if (n == 0)
+      return false;
+    if ((errno == EAGAIN) || (errno == EWOULDBLOCK))
+      return true;
+    if (errno == EINTR)
+      continue;
+    return false;
+  }
 }
 
 
@@ -776,6 +1034,23 @@ static void connEvent(CorHttpServer* serverP, CorHttpConn* connP, uint32_t event
     return;
   }
 
+  //
+  // A file or a stream body on its way: the client sends nothing now - what it does send is read and
+  // dropped (a request behind this one is not served; corHttp does not pipeline), and its hang-up closes
+  // the connection, which is how a stream's writer learns that it is gone
+  //
+  if (corHttpBodyBusy(connP) == true)
+  {
+    if ((events & EPOLLIN) && (sinkRead(connP) == false))
+    {
+      connClose(serverP, connP);
+      return;
+    }
+
+    if ((events & EPOLLOUT) == 0)
+      return;
+  }
+
   if (events & EPOLLOUT)
   {
     CorHttpStatus s = writeAll(connP);
@@ -787,6 +1062,12 @@ static void connEvent(CorHttpServer* serverP, CorHttpConn* connP, uint32_t event
     {
       connClose(serverP, connP);
       return;
+    }
+
+    if ((connP->fileFd != -1) || (connP->streamP != NULL))
+    {
+      if (bodyPump(serverP, connP) == false)
+        return;
     }
 
     connP->requests++;
@@ -875,6 +1156,9 @@ static void idleSweep(CorHttpServer* serverP)
 
     if ((connP->state == COR_HTTP_CONN_FREE) || (connP->state == COR_HTTP_CONN_IDLE))
       continue;
+
+    if (connP->streamP != NULL)
+      continue;                                  // a stream is quiet for as long as its writer is (corHttpResponseStream)
 
     if ((now - connP->lastActivity) > timeout)
       connClose(serverP, connP);
@@ -1124,6 +1408,18 @@ void corHttpRelease(CorHttpServer* serverP)
   {
     close(serverP->resumeFd);
     serverP->resumeFd = -1;
+  }
+
+  //
+  // Streams still queued: the queue's references dropped (their connections go with the pool below)
+  //
+  while (serverP->streamHead != NULL)
+  {
+    CorHttpStream* sP = serverP->streamHead;
+
+    serverP->streamHead = sP->next;
+    sP->next            = NULL;
+    corHttpStreamUnref(sP);
   }
 
   pthread_mutex_destroy(&serverP->resumeMutex);

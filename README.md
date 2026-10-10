@@ -96,6 +96,31 @@ here. The connection is not reusable afterwards (the rest of the body is still
 arriving) and is closed, which is what the `Connection: close` on that answer
 says. Only a client that *lies* about its length reaches the buffer limit.
 
+**A body that is not in memory: a file, or a stream.** An ordinary response is
+one buffer, rendered and written whole. Two kinds of body are not:
+
+- `corHttpResponseFile(connP, fd, offset, length)` - bytes of a file, sent with
+  `sendfile` as the socket takes them, never read into memory; `Content-Length`
+  is `length`. A Range answer sets its own `206` and `Content-Range`: the
+  library sends the bytes it is told to. The fd is closed when they are out, or
+  when the connection dies first.
+- `corHttpResponseStream(connP)` - a body written over time, after the callback
+  has returned: `corHttpStreamWrite(streamP, data, len)` from **any** thread,
+  `corHttpStreamEnd(streamP)` once at the end. It goes out with
+  `Transfer-Encoding: chunked` (to an HTTP/1.0 client: raw, and the connection
+  closes at the end). The writer holds the stream, never the connection: a
+  write copies the bytes into the stream and wakes the loop through the same
+  eventfd `corHttpResume` uses, and the loop writes them - the socket stays the
+  loop's alone. A client that hangs up makes the next write say `false`; a
+  client that falls 16 MiB behind (`COR_HTTP_STREAM_PENDING_MAX`) is
+  disconnected. A stream is not closed by the idle sweep: it is as quiet as its
+  writer. Server-sent events are a stream with `Content-Type:
+  text/event-stream`.
+
+An ordinary response does not change by a byte; the headers of the two others
+differ only where they must (`Content-Length` of the file's part,
+`Transfer-Encoding: chunked` in place of a length).
+
 ## Not implemented
 
 **HTTP pipelining.** A second request arriving in the same packet as the first
@@ -114,6 +139,7 @@ make            # libcorHttp.a, libcorHttp.so
 make di         # ... and install
 make corHttpTest
 make listenTest  # bind address and SO_REUSEPORT
+make streamTest  # a file body and a streamed body (chunked, from another thread, a client gone or behind)
 ```
 
 `corHttpTest` is a server that echoes back what it parsed — method, path, query,
