@@ -157,9 +157,11 @@ $ curl "localhost:1041/ngsi-ld/v1/entities?type=T&limit=5&local"
 
 In use. `corRest` selects it with `COR_HTTP_SERVER=builtin`, and the coraine
 NGSI-LD broker then runs with no HTTP dependency beyond libc. Coraine's
-functional suite compares captured HTTP responses line by line and goes green on
-both servers — 641 tests on libmicrohttpd, 640 on this one, the difference being
-the single test whose notification receiver has to serve HTTPS.
+functional suite compares captured HTTP responses line by line and runs on both
+servers - its corDB shards on this one in every pull request, both servers in
+the nightly run. A test tied to one server says so (`REQUIRE_HTTPSERVER`): five
+need libmicrohttpd - among them the one whose notification receiver serves
+HTTPS, which this server cannot (it has no TLS) - and two need this one.
 
 Not one expected byte changed, and that is the bar: the caller of this library
 percent-decodes the path and the query itself — including `+`-means-space, which
