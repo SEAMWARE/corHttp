@@ -1273,9 +1273,12 @@ CorHttpStatus corHttpServe(CorHttpServer* serverP)
   struct epoll_event events[COR_HTTP_MAX_EVENTS];
   uint64_t           lastSweep = corHttpNowMs();
 
-  serverP->running = true;
-
-  while (serverP->running == true)
+  //
+  // No "running = true" here: the loop thread gets this far only once the scheduler runs it, and a
+  // corHttpStop of before then - a SIGTERM to a broker that answers on its first loop already - was
+  // overwritten by it, and the loop never ended (its join hung the broker's stop)
+  //
+  while (atomic_load(&serverP->stopped) == false)
   {
     //
     // A one-second timeout, which is what makes the sweep and the stop flag
@@ -1362,11 +1365,12 @@ void corHttpServeEnd(CorHttpServer* serverP)
 //
 // Sets a flag and returns. Safe from a signal handler, which is where it is
 // called from: the loop notices within its one-second timeout, and tearing down
-// epoll from a handler while the loop is inside epoll_wait would not be.
+// epoll from a handler while the loop is inside epoll_wait would not be. Before
+// corHttpServe has started too: it then returns at once.
 //
 void corHttpStop(CorHttpServer* serverP)
 {
-  serverP->running = false;
+  atomic_store(&serverP->stopped, true);
 
   //
   // ...and wake the loop now: it notices the flag only when epoll_wait returns, which with nothing to

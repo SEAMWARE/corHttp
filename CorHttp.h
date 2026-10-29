@@ -25,6 +25,7 @@
 // that needs a value afterwards has to copy it.
 //
 #include <pthread.h>                             // pthread_mutex_t
+#include <stdatomic.h>                           // atomic_bool
 #include <stdbool.h>                             // bool
 #include <stdint.h>                              // uint64_t
 
@@ -283,7 +284,11 @@ typedef struct CorHttpServer
   int                  handSize;
   int                  handFd;
 
-  bool                 running;
+  //
+  // Set by corHttpStop, never cleared: corHttpServe returns once it is set, a stop that came before the
+  // loop started included (corHttpInit clears it)
+  //
+  atomic_bool          stopped;
 
   //
   // The stream queue: streams with bytes (or their end) waiting for THIS loop to write them - the
