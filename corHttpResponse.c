@@ -41,7 +41,7 @@
 #include <stdlib.h>                              // malloc, realloc
 #include <string.h>                              // memcpy, strcmp, strlen
 #include <time.h>                                // time, gmtime_r
-#include <unistd.h>                              // write
+#include <sys/socket.h>                          // send, MSG_NOSIGNAL
 
 #include "corHttp/CorHttp.h"                     // CorHttpConn
 #include "corHttp/corHttpInternal.h"             // Own interface
@@ -328,7 +328,7 @@ CorHttpStatus corHttpContinueSend(CorHttpConn* connP)
 
   while (written < len)
   {
-    ssize_t n = write(connP->fd, continue100 + written, len - written);
+    ssize_t n = send(connP->fd, continue100 + written, len - written, MSG_NOSIGNAL);   // a client gone: EPIPE, not SIGPIPE
 
     if (n < 0)
     {

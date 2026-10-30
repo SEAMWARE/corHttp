@@ -39,7 +39,7 @@
 #include <sys/epoll.h>                           // epoll_create1, epoll_ctl, epoll_wait
 #include <sys/eventfd.h>                         // eventfd
 #include <sys/sendfile.h>                        // sendfile
-#include <sys/socket.h>                          // socket, bind, listen, accept4, setsockopt
+#include <sys/socket.h>                          // socket, bind, listen, accept4, setsockopt, send, MSG_NOSIGNAL
 #include <unistd.h>                              // read, write, close
 
 #include "corBase/corCoLoop.h"                  // corCoLoopEvent, corCoLoopExpire, corCoLoopTimeoutMs
@@ -444,7 +444,7 @@ static CorHttpStatus writeAll(CorHttpConn* connP)
 {
   while (connP->writePos < connP->writeLen)
   {
-    ssize_t n = write(connP->fd, connP->writeBuf + connP->writePos, connP->writeLen - connP->writePos);
+    ssize_t n = send(connP->fd, connP->writeBuf + connP->writePos, connP->writeLen - connP->writePos, MSG_NOSIGNAL);   // a client gone: EPIPE, not SIGPIPE
 
     if (n < 0)
     {
